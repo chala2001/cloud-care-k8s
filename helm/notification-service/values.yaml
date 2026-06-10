@@ -1,0 +1,39 @@
+replicaCount: 1
+
+image:
+  repository: ""
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8004                 # notification-service listens on 8004
+
+resources:
+  requests:
+    memory: "64Mi"
+    cpu: "50m"
+  limits:
+    memory: "128Mi"
+    cpu: "200m"
+
+healthCheck:
+  path: /health
+  port: 8004
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+env:
+  SES_FROM_ADDRESS: "noreply@cloudcare.local"
+  AWS_DEFAULT_REGION: "ap-south-1"
+  LOG_LEVEL: "INFO"
+
+# Set to "true" in dev — logs emails to console instead of sending via real SES
+# Leave empty in prod — real SES is used via IRSA
+localDev: ""
+
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70

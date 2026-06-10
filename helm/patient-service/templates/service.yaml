@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}              # "patient-service" — other pods use this name
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "patient-service.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}       # ClusterIP — internal only
+  selector:
+    {{- include "patient-service.selectorLabels" . | nindent 4 }}
+    # routes traffic to pods that have these labels (i.e. the Deployment's pods)
+  ports:
+    - protocol: TCP
+      port: {{ .Values.service.port }}        # port callers dial (8001)
+      targetPort: {{ .Values.service.port }}  # port on the pod (also 8001)

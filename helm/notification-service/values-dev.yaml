@@ -1,0 +1,11 @@
+image:
+  repository: "notification-service"
+  tag: "local"
+  pullPolicy: Never
+
+env:
+  SES_FROM_ADDRESS: "noreply@cloudcare.local"
+  AWS_DEFAULT_REGION: "ap-south-1"
+  LOG_LEVEL: "DEBUG"
+
+localDev: "true"             # emails printed to pod logs, no SES call made
