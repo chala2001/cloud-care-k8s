@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-service
+  namespace: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-service
+  template:
+    metadata:
+      labels:
+        app: audit-service
+    spec:
+      containers:
+        - name: audit-service
+          image: audit-service:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8003
+          env:
+            - name: DYNAMODB_TABLE
+              value: "audit_events"
+            - name: AWS_DEFAULT_REGION
+              value: "ap-south-1"
+            - name: DYNAMODB_ENDPOINT_URL
+              value: "http://dynamodb-local:8000"   # local dev only
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
