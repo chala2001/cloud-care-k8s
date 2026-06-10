@@ -1,0 +1,13 @@
+image:
+  repository: "appointment-service"
+  tag: "local"
+  pullPolicy: Never              # use local minikube image
+
+env:
+  DB_SCHEMA: "appointments"
+  LOG_LEVEL: "DEBUG"
+  PATIENT_SERVICE_URL: "http://patient-service:8001"
+  AUDIT_SERVICE_URL: "http://audit-service:8003"
+  NOTIFICATION_SERVICE_URL: "http://notification-service:8004"
+
+databaseUrl: "postgresql://appt_svc:appt_pass@postgres:5432/cloudcare"

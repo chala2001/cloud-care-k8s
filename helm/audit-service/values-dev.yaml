@@ -1,0 +1,16 @@
+image:
+  repository: "audit-service"
+  tag: "local"
+  pullPolicy: Never
+
+env:
+  DYNAMODB_TABLE: "audit_events"
+  AWS_DEFAULT_REGION: "ap-south-1"
+  LOG_LEVEL: "DEBUG"
+
+# Point to DynamoDB Local container running in the cluster
+dynamodbEndpointUrl: "http://dynamodb-local:8000"
+
+# Fake credentials — DynamoDB Local accepts any value here
+awsAccessKeyId: "local"
+awsSecretAccessKey: "local"

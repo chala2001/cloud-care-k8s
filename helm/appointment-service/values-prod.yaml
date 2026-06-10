@@ -1,0 +1,31 @@
+replicaCount: 2
+
+image:
+  repository: "123456789.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-appointment-service"
+  tag: "latest"                  # CI overrides with git SHA: --set image.tag=abc1234
+  pullPolicy: Always
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "500m"
+
+env:
+  DB_SCHEMA: "appointments"
+  LOG_LEVEL: "WARNING"
+  PATIENT_SERVICE_URL: "http://patient-service:8001"
+  AUDIT_SERVICE_URL: "http://audit-service:8003"
+  NOTIFICATION_SERVICE_URL: "http://notification-service:8004"
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+externalSecret:
+  enabled: true
+  remoteSecretName: "cloudcare-k8s/appointment-service/db"
