@@ -1,25 +1,22 @@
-import os
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker, declarative_base
+from pydantic import BaseModel, Field
+from datetime import date, datetime
+from typing import Optional
 
-DATABASE_URL = os.environ["DATABASE_URL"]
-DB_SCHEMA = os.environ.get("DB_SCHEMA", "patients")
 
-engine = create_engine(DATABASE_URL)
+class PatientIn(BaseModel):
+    """Fields required when creating or updating a patient."""
+    full_name: str = Field(..., min_length=2, max_length=200,
+                           description="Patient's full name")
+    date_of_birth: date = Field(...,
+                                description="Date of birth in YYYY-MM-DD format")
+    phone: str = Field(..., min_length=7, max_length=20,
+                       description="Contact phone number")
 
-# Set search_path so all queries go to the patients schema
-@event.listens_for(engine, "connect")
-def set_search_path(dbapi_conn, connection_record):
-    cursor = dbapi_conn.cursor()
-    cursor.execute(f"SET search_path TO {DB_SCHEMA}")
-    cursor.close()
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+class PatientOut(PatientIn):
+    """Fields returned when reading a patient — includes server-generated fields."""
+    id: int
+    created_at: datetime
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    class Config:
+        from_attributes = True   # allows SQLAlchemy models to be converted directly
