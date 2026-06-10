@@ -1,7 +1,12 @@
 # 01 — Local Setup
 
-> **Goal of this doc:** install every tool you need, run all four microservices with
-> Docker Compose, and get a pod running on minikube — before touching AWS at all.
+> **Goal of this doc:** install every tool you need and understand what each one does —
+> so you are fully ready before writing a single line of code.
+>
+> ⚠️ **Important ordering note:** We install tools here, but we do NOT run the services
+> yet. The services don't exist yet — we write all the code in **Doc 02**. After Doc 02
+> you'll come back and run `docker compose up` for the first time. Then in this same doc
+> you'll run the services on minikube.
 
 Everything in this doc costs **zero dollars**. We're building on your laptop.
 
@@ -9,56 +14,71 @@ Everything in this doc costs **zero dollars**. We're building on your laptop.
 
 ## 1. Tools You Need
 
-You likely have some of these from CloudCare v1. Install anything missing.
+You likely have some of these from CloudCare v1. Install anything missing and verify
+each one before continuing.
 
 ### 1.1 Docker Desktop
 
-Docker Desktop includes both the Docker daemon **and** `kubectl` (the Kubernetes CLI).
+Docker Desktop includes the Docker daemon (runs containers), Docker Compose (runs
+multiple containers together), and `kubectl` (the Kubernetes CLI).
 
+**Install:**
 - Download: https://www.docker.com/products/docker-desktop/
 - After install, open Docker Desktop and wait for the green "Running" indicator.
-- Verify:
 
+**Verify:**
 ```bash
 docker --version
 # Docker version 27.x.x, build ...
+
+docker compose version
+# Docker Compose version v2.x.x
 
 kubectl version --client
 # Client Version: v1.30.x
 ```
 
-> 🧠 **What is kubectl?** It's the command-line tool for talking to a Kubernetes cluster —
-> the same way `aws` CLI talks to AWS. Every `kubectl` command you'll ever run follows
+> 🧠 **What is kubectl?** It's the command-line tool for talking to a Kubernetes
+> cluster — the same way the `aws` CLI talks to AWS. Every `kubectl` command follows
 > the pattern: `kubectl <verb> <resource-type> <name> -n <namespace>`.
+> You'll use it dozens of times per day.
+
+---
 
 ### 1.2 minikube
 
-minikube runs a single-node Kubernetes cluster on your laptop, inside a VM or Docker
-container. It's the standard tool for local Kubernetes development.
+minikube runs a single-node Kubernetes cluster on your laptop inside a Docker container.
+It's the standard tool for local Kubernetes development — completely free.
 
+**Install:**
 ```bash
-# macOS (Homebrew)
+# macOS
 brew install minikube
 
-# Linux
+# Linux (Ubuntu/Debian)
 curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
 sudo install minikube-linux-amd64 /usr/local/bin/minikube
+rm minikube-linux-amd64
 
-# Windows (Chocolatey)
+# Windows (PowerShell as Admin)
 choco install minikube
 ```
 
-Verify:
+**Verify:**
 ```bash
 minikube version
 # minikube version: v1.33.x
+# commit: ...
 ```
+
+---
 
 ### 1.3 Helm 3
 
-Helm is the package manager for Kubernetes. You use it to install and upgrade
-applications on a cluster — the same way `apt` or `npm` manages packages.
+Helm is the package manager for Kubernetes. You use it to install applications on a
+cluster — the same way `apt` or `npm` manages packages on a machine.
 
+**Install:**
 ```bash
 # macOS
 brew install helm
@@ -70,305 +90,383 @@ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 choco install kubernetes-helm
 ```
 
-Verify:
+**Verify:**
 ```bash
 helm version
 # version.BuildInfo{Version:"v3.15.x", ...}
 ```
 
-### 1.4 Terraform (already installed from v1)
+---
 
-If you don't have it:
+### 1.4 Terraform >= 1.9
+
+You already have this from CloudCare v1. If not:
+
 ```bash
 # macOS
 brew tap hashicorp/tap && brew install hashicorp/tap/terraform
 
-# Linux (via tfenv — manages multiple versions)
+# Linux — use tfenv (manages multiple Terraform versions)
 git clone https://github.com/tfutils/tfenv.git ~/.tfenv
 echo 'export PATH="$HOME/.tfenv/bin:$PATH"' >> ~/.bashrc
-tfenv install 1.9.0 && tfenv use 1.9.0
+source ~/.bashrc
+tfenv install 1.9.0
+tfenv use 1.9.0
 ```
 
-Verify:
+**Verify:**
 ```bash
 terraform version
 # Terraform v1.9.x
+# on linux_amd64
 ```
 
+---
+
 ### 1.5 Python 3.12 + pip
+
+The four microservices are all written in Python 3.12.
 
 ```bash
 # macOS
 brew install python@3.12
+echo 'export PATH="/opt/homebrew/opt/python@3.12/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
 
 # Ubuntu/Debian
-sudo apt install python3.12 python3.12-venv python3-pip
+sudo apt update
+sudo apt install python3.12 python3.12-venv python3-pip -y
 
 # Verify
-python3.12 --version   # Python 3.12.x
+python3.12 --version
+# Python 3.12.x
 pip3 --version
+# pip 24.x from ...
 ```
 
+---
+
 ### 1.6 Node.js 20+
+
+For the React frontend.
 
 ```bash
 # macOS
 brew install node@20
+echo 'export PATH="/opt/homebrew/opt/node@20/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
 
 # Ubuntu/Debian
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # Verify
-node --version   # v20.x.x
+node --version
+# v20.x.x
 npm --version
+# 10.x.x
 ```
 
-### 1.7 AWS CLI v2 (already installed from v1)
+---
 
+### 1.7 AWS CLI v2
+
+Already installed from CloudCare v1. Verify:
 ```bash
 aws --version
 # aws-cli/2.x.x Python/3.x.x ...
+aws sts get-caller-identity
+# Should return your account ID without errors
 ```
 
 ---
 
-## 2. Understanding Docker Compose vs Kubernetes
+### 1.8 Summary Checklist
 
-Before we run anything, let's understand why we use Docker Compose locally and
-Kubernetes in production.
+Run all of these before continuing. Every single one must succeed:
 
-**Docker Compose** is a simple tool for running multiple containers together on one
-machine. You define all your services in a `docker-compose.yml` file and start them
-with one command. It's perfect for local development because it's fast and simple.
+```bash
+docker --version          # Docker version 27+
+docker compose version    # Docker Compose version v2+
+kubectl version --client  # Client Version v1.30+
+minikube version          # minikube version v1.33+
+helm version              # Version:"v3.15+"
+terraform version         # Terraform v1.9+
+python3.12 --version      # Python 3.12+
+node --version            # v20+
+aws --version             # aws-cli/2+
+```
 
-**Kubernetes** is a container *orchestrator* — it runs containers across a *cluster* of
-machines, handles failures, scales automatically, manages networking between services,
-and much more. It's the industry standard for production.
+If any of these fail, fix them before moving on. Don't skip ahead — a broken tool
+will silently cause problems 10 steps later.
+
+---
+
+## 2. Docker Compose vs Kubernetes — What's the Difference?
+
+Before writing code, understand why we use two different tools and when.
+
+### Docker Compose
+
+Runs multiple containers **on one machine**. You describe every service in a single
+`docker-compose.yml` file and start them all with `docker compose up`. It is:
+- Simple to set up
+- Fast to iterate on
+- Perfect for local development
+
+### Kubernetes
+
+Runs containers across a **cluster of machines**. It:
+- Keeps pods running if they crash
+- Scales pods up and down automatically
+- Performs zero-downtime rolling updates
+- Manages networking between services across nodes
+- Is the industry standard for production
 
 > 🧠 **Why not just use Kubernetes locally from day one?**
-> Kubernetes has a lot of moving parts. If you're still learning FastAPI code structure
-> and microservice boundaries, adding Kubernetes overhead makes everything harder.
-> Use Docker Compose to understand the *application*, then add Kubernetes to understand
-> the *infrastructure*. This is exactly how real teams work — compose for local dev,
-> Kubernetes for everything else.
+> Kubernetes has many moving parts. While you're still learning how the FastAPI code
+> works and how microservices talk to each other, adding Kubernetes complexity makes
+> everything harder to debug. The pattern used by real engineering teams: Docker Compose
+> for local development iteration, Kubernetes for staging and production.
 
----
+### The workflow we follow in this project:
 
-## 3. Running All Services with Docker Compose
-
-The project has a `docker-compose.yml` in the `services/` directory that starts all
-four microservices plus a local PostgreSQL and DynamoDB.
-
-### 3.1 Docker Compose File
-
-Here is what the `services/docker-compose.yml` looks like:
-
-```yaml
-version: "3.9"
-
-services:
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_DB: cloudcare
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: local_password
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-
-  patient-service:
-    build: ./patient-service
-    ports:
-      - "8001:8001"
-    environment:
-      DATABASE_URL: "postgresql://patient_svc:patient_pass@postgres:5432/cloudcare"
-      DB_SCHEMA: patients
-    depends_on:
-      - postgres
-
-  appointment-service:
-    build: ./appointment-service
-    ports:
-      - "8002:8002"
-    environment:
-      DATABASE_URL: "postgresql://appt_svc:appt_pass@postgres:5432/cloudcare"
-      DB_SCHEMA: appointments
-      PATIENT_SERVICE_URL: "http://patient-service:8001"
-    depends_on:
-      - postgres
-      - patient-service
-
-  audit-service:
-    build: ./audit-service
-    ports:
-      - "8003:8003"
-    environment:
-      DYNAMODB_TABLE: audit_events
-      AWS_DEFAULT_REGION: ap-south-1
-      # Local dev: uses a fake DynamoDB (DynamoDB Local)
-      DYNAMODB_ENDPOINT_URL: "http://dynamodb-local:8000"
-    depends_on:
-      - dynamodb-local
-
-  notification-service:
-    build: ./notification-service
-    ports:
-      - "8004:8004"
-    environment:
-      SES_FROM_ADDRESS: "noreply@example.com"
-      # Local dev: email is just logged, not actually sent
-
-  dynamodb-local:
-    image: amazon/dynamodb-local
-    ports:
-      - "8000:8000"
-
-volumes:
-  postgres_data:
 ```
-
-**Key things to notice:**
-- Each service has its own port (`8001`, `8002`, `8003`, `8004`)
-- `appointment-service` knows `patient-service` by its service name (`http://patient-service:8001`)
-  — Docker Compose creates an internal DNS for this
-- Each service gets its DB credentials via environment variables — same pattern as Kubernetes
-- Local DynamoDB (`amazon/dynamodb-local`) replaces real AWS DynamoDB for local testing
-
-### 3.2 Start All Services
-
-```bash
-cd services/
-docker compose up --build
-```
-
-You'll see output from all containers interleaved. After everything starts (30–60 seconds):
-
-```bash
-# Open Swagger UI for each service:
-# patient-service      → http://localhost:8001/docs
-# appointment-service  → http://localhost:8002/docs
-# audit-service        → http://localhost:8003/docs
-# notification-service → http://localhost:8004/docs
-```
-
-### 3.3 Test the Services
-
-Open `http://localhost:8001/docs` — you'll see FastAPI's interactive Swagger UI.
-
-Try creating a patient:
-```bash
-curl -X POST http://localhost:8001/patients \
-  -H "Content-Type: application/json" \
-  -d '{"full_name": "Nimal Silva", "date_of_birth": "1985-03-15", "phone": "0771234567"}'
-
-# Response: {"id": 1, "full_name": "Nimal Silva", ...}
-```
-
-Try creating an appointment (uses the patient ID from above):
-```bash
-curl -X POST http://localhost:8002/appointments \
-  -H "Content-Type: application/json" \
-  -d '{"patient_id": 1, "scheduled_for": "2026-07-01T10:00:00", "reason": "Annual checkup"}'
-```
-
-The appointment-service will call patient-service internally to verify the patient exists.
-That's inter-service communication — the core of microservices.
-
-### 3.4 Stop Everything
-
-```bash
-docker compose down          # stop containers, keep volumes
-docker compose down -v       # stop containers AND delete data volumes
+Step 1 (Doc 02): Write all the Python code for 4 microservices
+Step 2 (Doc 02): Run with Docker Compose → fast feedback, easy debugging
+Step 3 (Doc 03): Write Kubernetes YAML manifests
+Step 4 (Doc 03): Run on minikube → same code, Kubernetes behaviour
+Step 5 (Doc 05): Deploy to real EKS on AWS
 ```
 
 ---
 
-## 4. Your First Kubernetes Pod on minikube
+## 3. minikube — Your Local Kubernetes Cluster
 
-Now we'll run the same application on Kubernetes. This is intentionally simplified —
-we'll cover the full manifest structure in Doc 03.
+We'll use minikube fully starting in Doc 03, but here's what you need to know now.
 
-### 4.1 Start minikube
+### Start and Stop minikube
 
 ```bash
+# Start a cluster (first time takes 2–3 minutes to download images)
 minikube start --cpus=2 --memory=4g --driver=docker
-```
 
-This creates a single-node Kubernetes cluster running inside a Docker container on your
-machine. It takes 1–2 minutes the first time.
-
-Verify:
-```bash
+# Check the cluster is healthy
 kubectl get nodes
 # NAME       STATUS   ROLES           AGE   VERSION
-# minikube   Ready    control-plane   30s   v1.30.x
+# minikube   Ready    control-plane   60s   v1.30.x
+
+# Stop the cluster (keeps all state — pods, namespaces, deployments)
+minikube stop
+
+# Delete the cluster completely (start fresh next time)
+minikube delete
 ```
 
-`Ready` means the cluster is healthy and ready to accept workloads.
+The `Ready` status on the node means the cluster is healthy and ready for workloads.
 
-### 4.2 Key kubectl Commands You'll Use Every Day
+### What minikube Creates
+
+```
+minikube cluster (one Docker container on your machine)
+│
+└── Single Kubernetes node
+    ├── Kubernetes control plane (API server, scheduler, etcd)
+    └── Worker capacity (your pods run here)
+```
+
+In production EKS, the control plane is managed by AWS (~$0.10/hr) and worker nodes
+are separate EC2 instances. minikube combines all of this into one Docker container —
+free, and fast to start.
+
+---
+
+## 4. kubectl — Your Daily Command Reference
+
+You'll type `kubectl` hundreds of times. Memorise this cheatsheet.
+
+### Viewing Resources
 
 ```bash
-# Get all pods in a namespace
-kubectl get pods -n <namespace>
+# List all pods in a namespace
+kubectl get pods -n dev
 
-# Get all pods in ALL namespaces
+# List pods in ALL namespaces at once
 kubectl get pods -A
 
-# Describe a pod (full details, great for debugging)
-kubectl describe pod <pod-name> -n <namespace>
+# List everything in a namespace (pods, services, deployments...)
+kubectl get all -n dev
 
-# View logs from a pod
-kubectl logs <pod-name> -n <namespace>
+# See full details of a resource (great for debugging)
+kubectl describe pod <pod-name> -n dev
+kubectl describe deployment patient-service -n dev
 
-# Follow logs live (like tail -f)
-kubectl logs -f <pod-name> -n <namespace>
-
-# Execute a command inside a pod
-kubectl exec -it <pod-name> -n <namespace> -- /bin/sh
-
-# Port-forward a service to your localhost
-kubectl port-forward svc/<service-name> <local-port>:<service-port> -n <namespace>
-
-# Apply a manifest file
-kubectl apply -f <file.yaml>
-
-# Delete a resource
-kubectl delete -f <file.yaml>
-# OR
-kubectl delete pod <pod-name> -n <namespace>
+# See the full YAML of a running resource
+kubectl get deployment patient-service -n dev -o yaml
 ```
 
-> 🧠 **Namespaces** in Kubernetes are like logical partitions within a cluster.
-> We use `dev` and `prod` namespaces to keep environments isolated.
-> If you don't specify `-n <namespace>`, kubectl uses the `default` namespace.
-
-### 4.3 Run patient-service on minikube (Quick Test)
-
-Let's run a simplified version of patient-service on minikube to see how pods work.
-
-First, build the image inside minikube (so minikube can find it without a registry):
+### Logs and Debugging
 
 ```bash
-# Point your Docker CLI at minikube's Docker daemon
-eval $(minikube docker-env)
+# View logs of a pod
+kubectl logs <pod-name> -n dev
 
-# Now build the image — it goes into minikube, not your local Docker
-cd services/patient-service
-docker build -t patient-service:local .
+# Follow logs live (like tail -f)
+kubectl logs -f <pod-name> -n dev
+
+# View logs from a crashed/previous container
+kubectl logs <pod-name> -n dev --previous
+
+# Open a shell inside a running pod
+kubectl exec -it <pod-name> -n dev -- /bin/sh
 ```
 
-Now create a namespace and run the pod:
+### Applying and Deleting
+
+```bash
+# Apply a manifest file (create or update)
+kubectl apply -f deployment.yaml
+
+# Apply everything in a directory
+kubectl apply -f k8s/base/
+
+# Delete resources defined in a file
+kubectl delete -f deployment.yaml
+
+# Delete a resource by type and name
+kubectl delete pod <pod-name> -n dev
+kubectl delete deployment patient-service -n dev
+```
+
+### Namespaces
+
+```bash
+# Create a namespace
+kubectl create namespace dev
+
+# List all namespaces
+kubectl get namespaces
+
+# Set a default namespace so you don't type -n every time
+kubectl config set-context --current --namespace=dev
+```
+
+### Port Forwarding
+
+```bash
+# Forward a service port to localhost (run in background with &)
+kubectl port-forward svc/patient-service 8001:8001 -n dev &
+
+# Now call it from another terminal:
+curl http://localhost:8001/patients
+
+# Kill the port-forward when done:
+kill %1
+```
+
+> 🧠 **Why port-forward?** Services in Kubernetes are not accessible from outside
+> the cluster by default (ClusterIP). Port-forward creates a temporary tunnel from
+> your laptop's port to the service inside the cluster. It's only for testing —
+> in production, use Ingress.
+
+### Watching Changes in Real Time
+
+```bash
+# Watch pods update (useful during deploys)
+kubectl get pods -n dev -w
+
+# You'll see:
+# NAME                               READY   STATUS              RESTARTS
+# patient-service-abc123-old         1/1     Terminating         0
+# patient-service-def456-new         0/1     ContainerCreating   0
+# patient-service-def456-new         1/1     Running             0
+```
+
+---
+
+## 5. What Happens in minikube vs Docker Compose
+
+Once you've written the code in Doc 02 and run it with Docker Compose, you'll move
+to Kubernetes in Doc 03. Here's how the two compare:
+
+| Concern | Docker Compose | Kubernetes (minikube) |
+|---|---|---|
+| Start | `docker compose up` | `kubectl apply -f deployment.yaml` |
+| Service discovery | `http://patient-service:8001` | `http://patient-service:8001` (same!) |
+| Access from laptop | Port published automatically | `kubectl port-forward` |
+| Crash recovery | `restart: always` | Automatic (Deployment controller) |
+| Scale | `docker compose scale svc=3` | Edit `replicas: 3`, apply |
+| Rolling update | Stop + start | Zero-downtime rolling deploy |
+| Config | Env vars in compose file | ConfigMap or Secret |
+| Secrets | Env vars in compose file | Kubernetes Secret or External Secrets |
+
+Notice: **service discovery DNS works the same in both**. A service calling
+`http://patient-service:8001` works in Docker Compose and in Kubernetes. That's
+intentional — it makes it easy to move code between environments.
+
+---
+
+## ✅ Checkpoint — What to Do Now
+
+Before continuing:
+
+- [ ] All 9 tools verified above show the correct versions
+- [ ] `minikube start` completes and `kubectl get nodes` shows `Ready`
+- [ ] `minikube stop` stops the cluster cleanly
+
+**Do NOT try to run the services yet.** The code doesn't exist yet.
+
+**Next step:** Go to **[02 — Microservices Split](02-microservices-split.md)** and
+write all the Python code for the four services. At the end of Doc 02, you'll
+run `docker compose up` for the first time and see all services working.
+
+After Doc 02, come back here and continue to the minikube section below.
+
+---
+
+## 6. Running the Services on minikube (Do This After Doc 02)
+
+> **Come back to this section after completing Doc 02.** The steps below assume you
+> have already written all the Python code and tested it with Docker Compose.
+
+### 6.1 Build Images Inside minikube
+
+minikube has its own Docker daemon. You must build images inside it so Kubernetes
+can find them without needing a registry:
+
+```bash
+# Point your shell's Docker to minikube's daemon
+eval $(minikube docker-env)
+
+# Verify — you should see minikube's images, not your local ones
+docker images
+
+# Build all four service images inside minikube
+cd /path/to/cloud-care-k8s/services
+
+for svc in patient-service appointment-service audit-service notification-service; do
+  echo "Building $svc..."
+  (cd $svc && docker build -t $svc:local .)
+done
+
+# Verify images were built
+docker images | grep -E "patient|appointment|audit|notification"
+```
+
+### 6.2 Create Namespaces
 
 ```bash
 kubectl create namespace dev
+kubectl get namespaces
+# NAME          STATUS   AGE
+# default       Active   5m
+# dev           Active   2s
+# kube-system   Active   5m
 ```
 
-Create a file called `patient-service-test.yaml`:
+### 6.3 Quick Smoke Test on minikube
+
+Create a test manifest `patient-service-smoke.yaml` to verify the image runs:
 
 ```yaml
 apiVersion: apps/v1
@@ -389,12 +487,14 @@ spec:
       containers:
         - name: patient-service
           image: patient-service:local
-          imagePullPolicy: Never    # use local image, don't pull from registry
+          imagePullPolicy: Never
           ports:
             - containerPort: 8001
           env:
             - name: DATABASE_URL
-              value: "sqlite:///./test.db"   # SQLite for this quick test
+              value: "sqlite:///./test.db"
+            - name: DB_SCHEMA
+              value: "main"
 ---
 apiVersion: v1
 kind: Service
@@ -409,77 +509,38 @@ spec:
       targetPort: 8001
 ```
 
-Apply it:
+Apply and test:
 ```bash
-kubectl apply -f patient-service-test.yaml
-```
+kubectl apply -f patient-service-smoke.yaml
 
-Watch the pod come up:
-```bash
+# Watch until Running
 kubectl get pods -n dev -w
-# NAME                               READY   STATUS    RESTARTS   AGE
-# patient-service-7d9f8b6c9-xk2pq   1/1     Running   0          15s
-```
+# patient-service-xxx   1/1   Running   0   30s
 
-Once `Running`, port-forward and test:
-```bash
-kubectl port-forward svc/patient-service 8001:8001 -n dev
-# In another terminal:
+# Port-forward and test
+kubectl port-forward svc/patient-service 8001:8001 -n dev &
+curl http://localhost:8001/health
+# {"status": "ok", "service": "patient-service"}
+
 curl http://localhost:8001/patients
+# []
+
+# Clean up
+kubectl delete -f patient-service-smoke.yaml
 ```
 
-Congratulations — you just ran a containerised service on Kubernetes.
+### 6.4 Stop minikube When Done
 
-### 4.4 Clean Up
-
-```bash
-kubectl delete -f patient-service-test.yaml
-# or delete the whole namespace
-kubectl delete namespace dev
-```
-
-To stop minikube (keeps the cluster state):
 ```bash
 minikube stop
 ```
 
-To fully delete the minikube cluster:
-```bash
-minikube delete
-```
+**You are now ready for Doc 03** — Kubernetes Manifests, where we write proper
+production-quality YAML for all four services.
 
 ---
 
-## 5. Understanding the Difference: What Kubernetes Added
-
-Compare what happened in Docker Compose vs Kubernetes:
-
-| | Docker Compose | Kubernetes |
-|---|---|---|
-| Start a service | `docker compose up` | `kubectl apply -f deployment.yaml` |
-| Discovery between services | Service name (e.g., `patient-service`) | Service name (e.g., `patient-service.dev.svc.cluster.local`) |
-| Access from outside | Expose port directly | Port-forward or Ingress |
-| Restart on crash | `restart: always` in compose | Always restarts by default |
-| Scale | `docker compose scale patient-service=3` | Change `replicas: 3` in the Deployment |
-| Rolling update | Stop and restart | Zero-downtime rolling deploy |
-| Config / secrets | Environment variables | ConfigMaps and Secrets |
-
-The Kubernetes way is more complex, but everything is declarative (YAML files),
-version-controlled, and reproducible.
-
----
-
-## ✅ Checkpoint
-
-Before moving on, confirm:
-
-- [ ] `docker compose up` starts all 4 services and you can hit `http://localhost:8001/docs`
-- [ ] `minikube start` succeeds and `kubectl get nodes` shows `Ready`
-- [ ] You can run `kubectl apply -f patient-service-test.yaml` and see the pod reach `Running`
-- [ ] You can port-forward and hit `http://localhost:8001/patients`
-
-If all four are checked, you're ready for the next step.
-
-Next: **[02 — Microservices Split](02-microservices-split.md)** — understand how the
-monolith from v1 is split into four independent services and why each boundary was
-drawn where it was.
+> 🧠 **Remember:** Everything from Doc 01 through Doc 04 runs on minikube —
+> completely free. The first time we spend money is Doc 05 when we create the real
+> EKS cluster on AWS (~$2.40/day). Keep minikube stopped when you're not using it
+> to avoid unnecessary CPU usage on your laptop.
