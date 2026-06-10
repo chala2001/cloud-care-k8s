@@ -1,0 +1,37 @@
+{{- if .Values.hpa.enabled }}   # if hpa.enabled=false, this entire file produces NO output
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "patient-service.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Release.Name }}            # watches THIS deployment's CPU
+  minReplicas: {{ .Values.hpa.minReplicas }}   # never go below this
+  maxReplicas: {{ .Values.hpa.maxReplicas }}   # never go above this
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hpa.targetCPUUtilizationPercentage }}
+          # when average CPU across all pods exceeds this %, add more pods
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60    # wait 60s before scaling up again (prevent thrashing)
+      policies:
+        - type: Pods
+          value: 2                      # add max 2 pods per scale event
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300   # wait 5 min before removing pods
+      policies:
+        - type: Pods
+          value: 1                      # remove max 1 pod at a time (cautious)
+          periodSeconds: 60
+{{- end }}

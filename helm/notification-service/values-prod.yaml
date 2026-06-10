@@ -1,0 +1,27 @@
+replicaCount: 2
+
+image:
+  repository: "123456789.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-notification-service"
+  tag: "latest"
+  pullPolicy: Always
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "500m"
+
+env:
+  SES_FROM_ADDRESS: "noreply@cloudcare.com"   # real verified SES sender in prod
+  AWS_DEFAULT_REGION: "ap-south-1"
+  LOG_LEVEL: "WARNING"
+
+# localDev not set — real SES is used via IRSA (no stored AWS keys)
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70

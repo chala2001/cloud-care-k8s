@@ -1,0 +1,28 @@
+replicaCount: 2
+
+image:
+  repository: "123456789.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-audit-service"
+  tag: "latest"
+  pullPolicy: Always
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "500m"
+
+env:
+  DYNAMODB_TABLE: "audit_events"
+  AWS_DEFAULT_REGION: "ap-south-1"
+  LOG_LEVEL: "WARNING"
+
+# No dynamodbEndpointUrl in prod — uses real AWS DynamoDB
+# No awsAccessKeyId/awsSecretAccessKey — pod uses IRSA to get credentials (Doc 07)
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70

@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}               # becomes "patient-service"
+  namespace: {{ .Release.Namespace }}     # becomes "dev" or "prod"
+  labels:
+    {{- include "patient-service.labels" . | nindent 4 }}  # paste labels from _helpers.tpl
+spec:
+  replicas: {{ .Values.replicaCount }}    # 1 in dev, 2 in prod
+  selector:
+    matchLabels:
+      {{- include "patient-service.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "patient-service.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: patient-service
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          # dev  → "patient-service:local"
+          # prod → "123...ecr.amazonaws.com/...:abc1234"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}   # 8001
+          env:
+            {{- range $key, $val := .Values.env }}        # loop: one env var per item
+            - name: {{ $key }}                            # e.g. DB_SCHEMA
+              value: {{ $val | quote }}                   # e.g. "patients"
+            {{- end }}
+            {{- if not .Values.externalSecret.enabled }}
+            - name: DATABASE_URL
+              value: {{ .Values.databaseUrl | quote }}    # dev: plain value in YAML
+            {{- else }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:                             # prod: read from K8s Secret
+                  name: patient-service-db-secret
+                  key: DATABASE_URL
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}  # paste resources block as-is
+          readinessProbe:                                  # pod only gets traffic after this passes
+            httpGet:
+              path: {{ .Values.healthCheck.path }}
+              port: {{ .Values.healthCheck.port }}
+            initialDelaySeconds: {{ .Values.healthCheck.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthCheck.periodSeconds }}
+          livenessProbe:                                   # pod is restarted if this fails
+            httpGet:
+              path: {{ .Values.healthCheck.path }}
+              port: {{ .Values.healthCheck.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
