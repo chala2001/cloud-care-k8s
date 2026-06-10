@@ -1,0 +1,64 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: cloudcare
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: local_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  patient-service:
+    build: ./patient-service
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: "postgresql://patient_svc:patient_pass@postgres:5432/cloudcare"
+      DB_SCHEMA: patients
+    depends_on:
+      - postgres
+
+  appointment-service:
+    build: ./appointment-service
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: "postgresql://appt_svc:appt_pass@postgres:5432/cloudcare"
+      DB_SCHEMA: appointments
+      PATIENT_SERVICE_URL: "http://patient-service:8001"
+    depends_on:
+      - postgres
+      - patient-service
+
+  audit-service:
+    build: ./audit-service
+    ports:
+      - "8003:8003"
+    environment:
+      DYNAMODB_TABLE: audit_events
+      AWS_DEFAULT_REGION: ap-south-1
+      # Local dev: uses a fake DynamoDB (DynamoDB Local)
+      DYNAMODB_ENDPOINT_URL: "http://dynamodb-local:8000"
+    depends_on:
+      - dynamodb-local
+
+  notification-service:
+    build: ./notification-service
+    ports:
+      - "8004:8004"
+    environment:
+      SES_FROM_ADDRESS: "noreply@example.com"
+      # Local dev: email is just logged, not actually sent
+
+  dynamodb-local:
+    image: amazon/dynamodb-local
+    ports:
+      - "8000:8000"
+
+volumes:
+  postgres_data:
