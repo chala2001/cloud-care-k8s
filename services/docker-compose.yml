@@ -1,64 +1,115 @@
 version: "3.9"
 
+# ── Shared network so services can find each other by name ────────────────────
+networks:
+  cloudcare:
+    driver: bridge
+
 services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: cloudcare
-      POSTGRES_USER: admin
+      POSTGRES_DB:       cloudcare
+      POSTGRES_USER:     admin
       POSTGRES_PASSWORD: local_password
     ports:
-      - "5432:5432"
+      - "5432:5432"    # expose to host for psql / pgAdmin access
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql   # run on first start
+    networks:
+      - cloudcare
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d cloudcare"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
+  # ── DynamoDB Local ─────────────────────────────────────────────────────────
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.3.0
+    command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"
+    ports:
+      - "8000:8000"
+    networks:
+      - cloudcare
+
+  # ── patient-service ────────────────────────────────────────────────────────
   patient-service:
-    build: ./patient-service
+    build:
+      context: ./patient-service
+      dockerfile: Dockerfile
     ports:
       - "8001:8001"
     environment:
-      DATABASE_URL: "postgresql://patient_svc:patient_pass@postgres:5432/cloudcare"
-      DB_SCHEMA: patients
+      DATABASE_URL:      "postgresql://patient_svc:patient_pass@postgres:5432/cloudcare"
+      DB_SCHEMA:         "patients"
+      AUDIT_SERVICE_URL: "http://audit-service:8003"
+      LOG_LEVEL:         "INFO"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy   # wait until postgres is ready
+    networks:
+      - cloudcare
 
+  # ── appointment-service ────────────────────────────────────────────────────
   appointment-service:
-    build: ./appointment-service
+    build:
+      context: ./appointment-service
+      dockerfile: Dockerfile
     ports:
       - "8002:8002"
     environment:
-      DATABASE_URL: "postgresql://appt_svc:appt_pass@postgres:5432/cloudcare"
-      DB_SCHEMA: appointments
-      PATIENT_SERVICE_URL: "http://patient-service:8001"
+      DATABASE_URL:             "postgresql://appt_svc:appt_pass@postgres:5432/cloudcare"
+      DB_SCHEMA:                "appointments"
+      PATIENT_SERVICE_URL:      "http://patient-service:8001"
+      AUDIT_SERVICE_URL:        "http://audit-service:8003"
+      NOTIFICATION_SERVICE_URL: "http://notification-service:8004"
+      LOG_LEVEL:                "INFO"
     depends_on:
-      - postgres
-      - patient-service
+      postgres:
+        condition: service_healthy
+      patient-service:
+        condition: service_started
+    networks:
+      - cloudcare
 
+  # ── audit-service ──────────────────────────────────────────────────────────
   audit-service:
-    build: ./audit-service
+    build:
+      context: ./audit-service
+      dockerfile: Dockerfile
     ports:
       - "8003:8003"
     environment:
-      DYNAMODB_TABLE: audit_events
-      AWS_DEFAULT_REGION: ap-south-1
-      # Local dev: uses a fake DynamoDB (DynamoDB Local)
+      DYNAMODB_TABLE:        "audit_events"
+      AWS_DEFAULT_REGION:    "ap-south-1"
       DYNAMODB_ENDPOINT_URL: "http://dynamodb-local:8000"
+      AWS_ACCESS_KEY_ID:     "local"        # dummy values for local DynamoDB
+      AWS_SECRET_ACCESS_KEY: "local"
+      LOG_LEVEL:             "INFO"
     depends_on:
       - dynamodb-local
+    networks:
+      - cloudcare
 
+  # ── notification-service ───────────────────────────────────────────────────
   notification-service:
-    build: ./notification-service
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
     ports:
       - "8004:8004"
     environment:
-      SES_FROM_ADDRESS: "noreply@example.com"
-      # Local dev: email is just logged, not actually sent
-
-  dynamodb-local:
-    image: amazon/dynamodb-local
-    ports:
-      - "8000:8000"
+      SES_FROM_ADDRESS:   "noreply@cloudcare.local"
+      AWS_DEFAULT_REGION: "ap-south-1"
+      LOCAL_DEV:          "true"    # log emails to console, don't send via SES
+      LOG_LEVEL:          "INFO"
+    networks:
+      - cloudcare
 
 volumes:
   postgres_data:
+    driver: local
