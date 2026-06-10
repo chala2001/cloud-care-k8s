@@ -1,202 +1,173 @@
 # 04 — Helm Charts
 
-> **Goal of this doc:** understand what Helm is, why it's the industry standard for
-> deploying applications on Kubernetes, and write a complete Helm chart for
-> patient-service with dev and prod value overrides.
+> **Goal:** understand what Helm is, write a chart for patient-service, and deploy
+> it to minikube with separate dev and prod values.
 
 All work in this doc runs on **minikube — zero cost.**
 
 ---
 
-## 1. The Problem Helm Solves
+## 1. What is Helm and why do we need it?
 
-In Doc 03, you wrote raw YAML manifests. Imagine you have dev and prod environments.
-In dev you want 1 replica, in prod you want 3. Your Docker image tag changes with
-every deployment. Your secrets come from different sources per environment.
+You now have raw YAML files from Doc 03. They work — but there is a problem.
 
-Without Helm, you'd have two near-identical copies of every YAML file — one for dev,
-one for prod. Every change requires editing both files. That's error-prone.
+patient-service needs to run in **dev** and **prod**. The differences between them:
 
-**Helm** is the package manager for Kubernetes. You write a **chart** — a set of
-templates with placeholder variables — and provide different **values files** for
-different environments. Helm fills in the placeholders and produces final YAML.
+| Setting | Dev | Prod |
+|---|---|---|
+| Replicas | 1 | 2 |
+| Image tag | `local` | `abc1234` (git SHA) |
+| Log level | DEBUG | WARNING |
+| HPA | off | on |
+| Secrets | plain K8s Secret | AWS Secrets Manager |
+
+Without Helm you need **two full YAML files** for patient-service — one for dev, one
+for prod. For 4 services that's 8 files. Change one setting → edit 8 files. Easy to
+make mistakes and let files drift out of sync.
+
+**Helm solves this with templates + values files.**
+
+> Think of it like a job application form. The form (template) never changes.
+> You fill in different details (values) for different applicants (environments).
+> Same form, different answers, different output.
 
 ```
-Helm chart (templates)  +  values-dev.yaml   →  dev deployment (1 replica)
-Helm chart (templates)  +  values-prod.yaml  →  prod deployment (3 replicas)
+template + values-dev.yaml   →  dev Kubernetes YAML  (1 replica, local image)
+template + values-prod.yaml  →  prod Kubernetes YAML (2 replicas, ECR image)
 ```
-
-> 🧠 **Think of Helm like a template engine for Kubernetes.** The chart is the
-> structure; the values file is the configuration. Same structure, different config
-> per environment.
 
 ---
 
-## 2. Helm Concepts
+## 2. Helm vocabulary — 4 words to know
 
-### Chart
+| Word | Plain meaning |
+|---|---|
+| **Chart** | A folder with your templates + values files |
+| **Values** | The variables that fill in the template blanks |
+| **Release** | One deployed instance of a chart. "patient-service in dev" is one release, "patient-service in prod" is another |
+| **Render** | Helm fills in the blanks and produces final plain YAML |
 
-A chart is a directory with a specific structure:
+---
+
+## 3. Chart folder structure
 
 ```
-patient-service/
-├── Chart.yaml          ← chart metadata (name, version, description)
-├── values.yaml         ← default values
-├── values-dev.yaml     ← dev overrides
-├── values-prod.yaml    ← prod overrides
+helm/patient-service/
+├── Chart.yaml           ← identity card: name, version
+├── values.yaml          ← default values (fallback for anything not in dev/prod files)
+├── values-dev.yaml      ← only the things that differ in dev
+├── values-prod.yaml     ← only the things that differ in prod
 └── templates/
-    ├── deployment.yaml
-    ├── service.yaml
-    ├── hpa.yaml
-    ├── externalsecret.yaml
-    └── _helpers.tpl    ← reusable template snippets
-```
-
-### Release
-
-When you install a chart onto a cluster, Helm creates a **release** — a named
-instance of the chart. You can have the release `patient-service` in the `dev`
-namespace and another `patient-service` release in `prod`, both using the same
-chart but different values.
-
-### helm Commands You'll Use Every Day
-
-```bash
-# Install a chart (first time)
-helm install <release-name> <chart-path> -f values-dev.yaml -n <namespace>
-
-# Upgrade an existing release (also installs if not present)
-helm upgrade --install <release-name> <chart-path> -f values-dev.yaml -n <namespace>
-
-# List all releases in a namespace
-helm list -n dev
-
-# See the status of a release
-helm status patient-service -n dev
-
-# See the full rendered YAML without applying it (great for debugging)
-helm template <release-name> <chart-path> -f values-dev.yaml
-
-# Roll back to a previous version
-helm rollback patient-service 1 -n dev
-
-# Uninstall a release
-helm uninstall patient-service -n dev
-
-# Show the history of a release (all revisions)
-helm history patient-service -n dev
+    ├── _helpers.tpl     ← reusable name/label snippets (used by all templates)
+    ├── deployment.yaml  ← Deployment template with {{ placeholders }}
+    ├── service.yaml     ← Service template
+    └── hpa.yaml         ← HPA template (skipped entirely if hpa.enabled=false)
 ```
 
 ---
 
-## 3. Writing the Chart
-
-### 3.1 Chart.yaml
+## 4. Chart.yaml — the identity card
 
 `helm/patient-service/Chart.yaml`:
 ```yaml
-apiVersion: v2
-name: patient-service
+apiVersion: v2             # always v2 for Helm 3 (the modern version)
+name: patient-service      # chart name — must match the folder name
 description: CloudCare patient management microservice
-type: application
-version: 0.1.0        # chart version (bumped when the chart changes)
-appVersion: "1.0.0"   # application version (informational)
+type: application          # "application" = deploys real workloads
+version: 0.1.0             # chart version — bump when you change the chart structure
+appVersion: "1.0.0"        # your app version — informational, shown in helm list output
 ```
 
-### 3.2 values.yaml (Default Values)
+---
+
+## 5. values.yaml — the defaults
+
+Every variable used in the templates is defined here with a safe default. The dev/prod
+files only need to list what they want to **change** — everything else falls back here.
 
 `helm/patient-service/values.yaml`:
 ```yaml
-# Number of pod replicas
-replicaCount: 1
+replicaCount: 1            # how many pods to run
 
-# Docker image configuration
 image:
-  repository: ""               # set per-environment or via --set
-  tag: "latest"
-  pullPolicy: IfNotPresent
+  repository: ""           # which Docker image — empty, must be set per environment
+  tag: "latest"            # which version of the image
+  pullPolicy: IfNotPresent # only pull the image if not already on the node
 
-# Service configuration
 service:
-  type: ClusterIP
-  port: 8001
+  type: ClusterIP          # ClusterIP = internal only, not reachable from outside cluster
+  port: 8001               # port this service listens on
 
-# Resource requests and limits
 resources:
   requests:
-    memory: "64Mi"
-    cpu: "50m"
+    memory: "64Mi"         # minimum RAM Kubernetes guarantees to this pod
+    cpu: "50m"             # minimum CPU (50m = 0.05 of one CPU core, i.e. 5%)
   limits:
-    memory: "128Mi"
-    cpu: "200m"
+    memory: "128Mi"        # maximum RAM — pod is killed if it goes over this
+    cpu: "200m"            # maximum CPU — pod is throttled if it goes over this
 
-# Health check paths
 healthCheck:
-  path: /health
+  path: /health            # URL Kubernetes hits to check if the pod is ready
   port: 8001
-  initialDelaySeconds: 5
-  periodSeconds: 10
+  initialDelaySeconds: 5   # wait 5s after pod starts before first check
+  periodSeconds: 10        # then check every 10s
 
-# Environment variables (non-secret)
-env:
+env:                       # non-secret config passed as environment variables
   DB_SCHEMA: "patients"
   LOG_LEVEL: "INFO"
 
-# HPA (Horizontal Pod Autoscaler) — disabled by default
 hpa:
-  enabled: false
+  enabled: false                       # HPA off by default
   minReplicas: 1
   maxReplicas: 5
-  targetCPUUtilizationPercentage: 70
+  targetCPUUtilizationPercentage: 70   # scale up when CPU goes above this %
 
-# External Secrets configuration
 externalSecret:
-  enabled: false           # only in production (Doc 07)
+  enabled: false           # off by default — only prod pulls from AWS Secrets Manager
   secretStoreRef:
     name: aws-secrets-store
     kind: ClusterSecretStore
   refreshInterval: "1h"
   remoteSecretName: ""     # e.g. cloudcare-k8s/patient-service/db
 
-# Database URL — for local dev only; in prod this comes from ExternalSecret
-databaseUrl: ""
+databaseUrl: ""            # dev only — in prod this comes from ExternalSecret (Doc 07)
 ```
 
-### 3.3 values-dev.yaml (Dev Overrides)
+---
+
+## 6. values-dev.yaml — dev overrides
+
+Only lists what is **different** from values.yaml. Helm merges this on top of the
+defaults — anything not listed here is inherited from values.yaml.
 
 `helm/patient-service/values-dev.yaml`:
 ```yaml
-replicaCount: 1
-
 image:
-  repository: "patient-service"
-  tag: "local"
-  pullPolicy: Never        # use locally built minikube image
+  repository: "patient-service"  # local image built with minikube docker-env
+  tag: "local"                   # the :local tag
+  pullPolicy: Never              # never pull from internet — use local image only
 
 env:
   DB_SCHEMA: "patients"
-  LOG_LEVEL: "DEBUG"
-  DATABASE_URL: "postgresql://patient_svc:patient_pass@postgres:5432/cloudcare"
+  LOG_LEVEL: "DEBUG"             # verbose logging in dev
 
-hpa:
-  enabled: false           # no HPA in dev — save resources
-
-externalSecret:
-  enabled: false           # use plain K8s secret in dev
+databaseUrl: "postgresql://patient_svc:patient_pass@postgres:5432/cloudcare"
 ```
 
-### 3.4 values-prod.yaml (Prod Overrides)
+---
+
+## 7. values-prod.yaml — prod overrides
 
 `helm/patient-service/values-prod.yaml`:
 ```yaml
-replicaCount: 2
+replicaCount: 2            # 2 pods for high availability
 
 image:
   repository: "123456789.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-patient-service"
-  tag: "latest"            # overridden by CI with git SHA: --set image.tag=abc1234
-  pullPolicy: Always
+  tag: "latest"            # CI pipeline overrides this with git SHA: --set image.tag=abc1234
+  pullPolicy: Always       # always pull fresh from ECR on every deploy
 
-resources:
+resources:                 # larger resources for real prod traffic
   requests:
     memory: "128Mi"
     cpu: "100m"
@@ -206,45 +177,49 @@ resources:
 
 env:
   DB_SCHEMA: "patients"
-  LOG_LEVEL: "WARNING"
+  LOG_LEVEL: "WARNING"     # less noisy in prod
 
 hpa:
-  enabled: true
+  enabled: true            # auto-scale on in prod
   minReplicas: 2
   maxReplicas: 6
   targetCPUUtilizationPercentage: 70
 
 externalSecret:
-  enabled: true
+  enabled: true            # pull DATABASE_URL from AWS Secrets Manager (Doc 07)
   remoteSecretName: "cloudcare-k8s/patient-service/db"
 ```
 
 ---
 
-## 4. Writing the Templates
+## 8. Templates — YAML with blanks
 
-Helm templates use Go's `text/template` syntax. The key syntax:
+Helm fills in `{{ }}` placeholders when you run `helm upgrade --install`.
 
-- `{{ .Values.replicaCount }}` — reads a value from values.yaml
-- `{{ .Release.Name }}` — the release name passed to `helm install`
-- `{{ .Release.Namespace }}` — the namespace
-- `{{- if .Values.hpa.enabled }}` — conditional block
-- `{{- end }}` — end of conditional or range
+**Three things to understand:**
 
-### 4.1 _helpers.tpl
+```
+{{ .Values.replicaCount }}          read a value from values.yaml
+{{ .Release.Name }}                 the release name you typed in the helm command
+{{- if .Values.hpa.enabled }}       only render this block if hpa.enabled is true
+{{- end }}                          close the if block
+{{- range $k, $v := .Values.env }}  loop over every item in the env map
+```
+
+The `-` in `{{-` strips blank lines to keep the output YAML clean.
+
+### templates/_helpers.tpl
+
+This file defines reusable label snippets that all other templates import. You do not
+need to edit it — just know it exists so you understand `include` in the templates.
 
 `helm/patient-service/templates/_helpers.tpl`:
 ```
-{{/*
-Expand the name of the chart.
-*/}}
 {{- define "patient-service.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{/*
-Common labels applied to all resources in this chart.
-*/}}
+{{/* Labels added to every resource */}}
 {{- define "patient-service.labels" -}}
 app.kubernetes.io/name: {{ include "patient-service.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -252,28 +227,26 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
-{{/*
-Selector labels used by the Deployment and Service.
-*/}}
+{{/* Selector labels used by Deployment and Service to find their pods */}}
 {{- define "patient-service.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "patient-service.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 ```
 
-### 4.2 deployment.yaml
+### templates/deployment.yaml
 
 `helm/patient-service/templates/deployment.yaml`:
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}
-  namespace: {{ .Release.Namespace }}
+  name: {{ .Release.Name }}               # becomes "patient-service"
+  namespace: {{ .Release.Namespace }}     # becomes "dev" or "prod"
   labels:
-    {{- include "patient-service.labels" . | nindent 4 }}
+    {{- include "patient-service.labels" . | nindent 4 }}  # paste labels from _helpers.tpl
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.replicaCount }}    # 1 in dev, 2 in prod
   selector:
     matchLabels:
       {{- include "patient-service.selectorLabels" . | nindent 6 }}
@@ -285,33 +258,35 @@ spec:
       containers:
         - name: patient-service
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          # dev  → "patient-service:local"
+          # prod → "123...ecr.amazonaws.com/...:abc1234"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
-            - containerPort: {{ .Values.service.port }}
+            - containerPort: {{ .Values.service.port }}   # 8001
           env:
-            {{- range $key, $val := .Values.env }}
-            - name: {{ $key }}
-              value: {{ $val | quote }}
+            {{- range $key, $val := .Values.env }}        # loop: one env var per item
+            - name: {{ $key }}                            # e.g. DB_SCHEMA
+              value: {{ $val | quote }}                   # e.g. "patients"
             {{- end }}
             {{- if not .Values.externalSecret.enabled }}
             - name: DATABASE_URL
-              value: {{ .Values.databaseUrl | quote }}
+              value: {{ .Values.databaseUrl | quote }}    # dev: plain value in YAML
             {{- else }}
             - name: DATABASE_URL
               valueFrom:
-                secretKeyRef:
+                secretKeyRef:                             # prod: read from K8s Secret
                   name: patient-service-db-secret
                   key: DATABASE_URL
             {{- end }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          readinessProbe:
+            {{- toYaml .Values.resources | nindent 12 }}  # paste resources block as-is
+          readinessProbe:                                  # pod only gets traffic after this passes
             httpGet:
               path: {{ .Values.healthCheck.path }}
               port: {{ .Values.healthCheck.port }}
             initialDelaySeconds: {{ .Values.healthCheck.initialDelaySeconds }}
             periodSeconds: {{ .Values.healthCheck.periodSeconds }}
-          livenessProbe:
+          livenessProbe:                                   # pod is restarted if this fails
             httpGet:
               path: {{ .Values.healthCheck.path }}
               port: {{ .Values.healthCheck.port }}
@@ -319,32 +294,33 @@ spec:
             periodSeconds: 20
 ```
 
-### 4.3 service.yaml
+### templates/service.yaml
 
 `helm/patient-service/templates/service.yaml`:
 ```yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ .Release.Name }}              # "patient-service" — other pods use this name
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "patient-service.labels" . | nindent 4 }}
 spec:
-  type: {{ .Values.service.type }}
+  type: {{ .Values.service.type }}       # ClusterIP — internal only
   selector:
     {{- include "patient-service.selectorLabels" . | nindent 4 }}
+    # routes traffic to pods that have these labels (i.e. the Deployment's pods)
   ports:
     - protocol: TCP
-      port: {{ .Values.service.port }}
-      targetPort: {{ .Values.service.port }}
+      port: {{ .Values.service.port }}        # port callers dial (8001)
+      targetPort: {{ .Values.service.port }}  # port on the pod (also 8001)
 ```
 
-### 4.4 hpa.yaml
+### templates/hpa.yaml
 
 `helm/patient-service/templates/hpa.yaml`:
 ```yaml
-{{- if .Values.hpa.enabled }}
+{{- if .Values.hpa.enabled }}   # if hpa.enabled=false, this entire file produces NO output
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -356,9 +332,9 @@ spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ .Release.Name }}
-  minReplicas: {{ .Values.hpa.minReplicas }}
-  maxReplicas: {{ .Values.hpa.maxReplicas }}
+    name: {{ .Release.Name }}            # watches THIS deployment's CPU
+  minReplicas: {{ .Values.hpa.minReplicas }}   # never go below this
+  maxReplicas: {{ .Values.hpa.maxReplicas }}   # never go above this
   metrics:
     - type: Resource
       resource:
@@ -366,139 +342,96 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.hpa.targetCPUUtilizationPercentage }}
+          # when average CPU across all pods exceeds this %, add more pods
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60    # wait 60s before scaling up again (prevent thrashing)
+      policies:
+        - type: Pods
+          value: 2                      # add max 2 pods per scale event
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300   # wait 5 min before removing pods
+      policies:
+        - type: Pods
+          value: 1                      # remove max 1 pod at a time (cautious)
+          periodSeconds: 60
 {{- end }}
 ```
 
-The `{{- if .Values.hpa.enabled }}` and `{{- end }}` mean: **only render this template
-if `hpa.enabled` is `true` in values**. So in dev (where HPA is disabled), this file
-produces no output at all.
+---
+
+## 9. Commands you will use every day
+
+```bash
+# Preview the final YAML Helm generates — does NOT apply anything to the cluster
+# Always run this first to verify your values are filling in correctly
+helm template patient-service ./helm/patient-service -f helm/patient-service/values-dev.yaml
+
+# Deploy (installs if first time, upgrades if already installed)
+helm upgrade --install patient-service ./helm/patient-service \
+  -f helm/patient-service/values-dev.yaml \
+  --namespace dev
+
+# Same command for prod — only the values file and namespace change
+helm upgrade --install patient-service ./helm/patient-service \
+  -f helm/patient-service/values-prod.yaml \
+  --namespace prod
+
+# List all deployed releases
+helm list -n dev
+
+# See all versions ever deployed (each deploy = new revision number)
+helm history patient-service -n dev
+
+# Roll back to a previous version — one command, ~30 seconds
+helm rollback patient-service 1 -n dev
+
+# Delete a release
+helm uninstall patient-service -n dev
+```
+
+**Why rollback is so much faster than CloudCare v1:**
+- v1: find old AMI → re-tag → push → trigger instance refresh → wait 5–10 min
+- v2: `helm rollback patient-service 1 -n dev` → done in ~30 seconds
 
 ---
 
-## 5. Deploy to minikube with Helm
+## 10. Deploy to minikube
 
 ```bash
-# Start minikube and build images
-minikube start --cpus=2 --memory=4g
+# Build images inside minikube
 eval $(minikube docker-env)
 for svc in patient-service appointment-service audit-service notification-service; do
   (cd services/$svc && docker build -t $svc:local .)
 done
 
-# Create the dev namespace
+# Create namespace
 kubectl create namespace dev 2>/dev/null || true
 
-# Deploy patient-service using Helm
-helm upgrade --install patient-service ./helm/patient-service \
-  -f helm/patient-service/values-dev.yaml \
-  --namespace dev
-
-# Check the release
-helm list -n dev
-# NAME              NAMESPACE  REVISION  STATUS    CHART
-# patient-service   dev        1         deployed  patient-service-0.1.0
-
-# Check the pods
-kubectl get pods -n dev
-# NAME                               READY   STATUS    RESTARTS   AGE
-# patient-service-7d9f8b6c9-xk2pq   1/1     Running   0          20s
-```
-
-Deploy all four services:
-```bash
+# Deploy all four services
 for svc in patient-service appointment-service audit-service notification-service; do
   helm upgrade --install $svc ./helm/$svc \
     -f helm/$svc/values-dev.yaml \
     --namespace dev
 done
+
+# Verify — you should see all releases with STATUS=deployed
+helm list -n dev
+
+# Verify pods are running
+kubectl get pods -n dev
 ```
 
 ---
 
-## 6. Verify: Preview the Rendered YAML
+## ✅ Checkpoint — answer these before moving on
 
-Before deploying, always preview what Helm will generate:
-
-```bash
-helm template patient-service ./helm/patient-service -f helm/patient-service/values-dev.yaml
-```
-
-This prints the final YAML without applying anything. Use this to:
-- Verify placeholders were filled correctly
-- Debug unexpected values
-- Understand what's actually going to be applied
-
----
-
-## 7. Rollback
-
-One of Helm's most valuable features: you can roll back to any previous revision.
-
-```bash
-# Simulate a bad deploy
-helm upgrade patient-service ./helm/patient-service \
-  --set image.tag=broken-tag \
-  -f helm/patient-service/values-dev.yaml \
-  --namespace dev
-
-# See the history
-helm history patient-service -n dev
-# REVISION  STATUS      CHART
-# 1         superseded  patient-service-0.1.0
-# 2         failed      patient-service-0.1.0   ← bad deploy
-
-# Roll back to revision 1
-helm rollback patient-service 1 -n dev
-# Rollback was a success! Happy Helming!
-
-# History now shows revision 3 = rollback to 1's config
-helm history patient-service -n dev
-# REVISION  STATUS      CHART
-# 1         superseded  patient-service-0.1.0
-# 2         superseded  patient-service-0.1.0
-# 3         deployed    patient-service-0.1.0   ← this is now live
-```
-
-Compare this to CloudCare v1's rollback: find the old AMI, re-tag it as latest, push
-it, trigger an instance refresh, wait 5 minutes. With Helm: one command, 30 seconds.
-
----
-
-## 8. Chart Structure for All Four Services
-
-Each service has its own chart. They follow the same structure — only the values
-and image name differ:
-
-```
-helm/
-├── patient-service/
-│   ├── Chart.yaml
-│   ├── values.yaml
-│   ├── values-dev.yaml
-│   ├── values-prod.yaml
-│   └── templates/
-│       ├── _helpers.tpl
-│       ├── deployment.yaml
-│       ├── service.yaml
-│       ├── hpa.yaml
-│       └── externalsecret.yaml
-├── appointment-service/   ← same structure, port 8002
-├── audit-service/         ← same structure, port 8003
-└── notification-service/  ← same structure, port 8004
-```
-
----
-
-## ✅ Checkpoint
-
-You should be able to:
-
-- [ ] Explain what Helm does and why it's better than raw YAML for multiple environments.
-- [ ] Read a `values.yaml` and explain each field.
-- [ ] Run `helm template` and verify the rendered output.
-- [ ] Run `helm upgrade --install` and see a pod deploy.
-- [ ] Run `helm rollback` and verify it works.
-- [ ] Explain what `{{- if .Values.hpa.enabled }}` does.
+1. What is the difference between `values.yaml` and `values-dev.yaml`?
+2. What does `{{ .Values.replicaCount }}` do when Helm renders the template?
+3. What does `{{- if .Values.hpa.enabled }}` do in hpa.yaml?
+4. If you run `helm upgrade --install` twice, what happens the second time?
+5. Why is `helm rollback` faster than CloudCare v1 rollback?
 
 Next: **[05 — EKS with Terraform](05-eks-terraform.md)** — provision a real
 Kubernetes cluster on AWS. This is where free work ends — EKS costs ~$2.40/day.
