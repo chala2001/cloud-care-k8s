@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ── Shared network so services can find each other by name ────────────────────
 networks:
   cloudcare:

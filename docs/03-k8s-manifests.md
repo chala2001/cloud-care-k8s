@@ -603,7 +603,10 @@ spec:
       containers:
         - name: dynamodb-local
           image: amazon/dynamodb-local:2.3.0
-          command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+          # IMPORTANT: use 'command' (not 'args') with the full java command.
+          # In Kubernetes, 'command' overrides ENTRYPOINT — so we must include java explicitly.
+          # In Docker Compose, 'command' overrides CMD and keeps ENTRYPOINT (java) — different behavior!
+          command: ["java", "-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
           ports:
             - containerPort: 8000
 ---

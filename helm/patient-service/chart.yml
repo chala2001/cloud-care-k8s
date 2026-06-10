@@ -1,0 +1,6 @@
+apiVersion: v2
+name: patient-service
+description: CloudCare patient management microservice
+type: application
+version: 0.1.0        # chart version (bumped when the chart changes)
+appVersion: "1.0.0"   # application version (informational)
