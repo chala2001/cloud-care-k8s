@@ -1,9 +1,8 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.0
-sqlalchemy==2.0.30
-psycopg2-binary==2.9.9
+boto3==1.34.0
 pydantic[email]==2.7.1
-httpx==0.27.0
 prometheus-fastapi-instrumentator==6.1.0
 pytest==8.2.0
 pytest-asyncio==0.23.6
+moto[ses]==5.0.0
