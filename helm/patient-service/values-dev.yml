@@ -1,0 +1,17 @@
+replicaCount: 1
+
+image:
+  repository: "patient-service"
+  tag: "local"
+  pullPolicy: Never        # use locally built minikube image
+
+env:
+  DB_SCHEMA: "patients"
+  LOG_LEVEL: "DEBUG"
+  DATABASE_URL: "postgresql://patient_svc:patient_pass@postgres:5432/cloudcare"
+
+hpa:
+  enabled: false           # no HPA in dev — save resources
+
+externalSecret:
+  enabled: false           # use plain K8s secret in dev

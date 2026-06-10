@@ -31,6 +31,20 @@ def get_table():
     return dynamodb.Table(DYNAMODB_TABLE)
 
 
+def ensure_table():
+    """Create the table if it doesn't exist. Called before write operations."""
+    if DYNAMODB_ENDPOINT:
+        try:
+            dynamodb.create_table(
+                TableName=DYNAMODB_TABLE,
+                KeySchema=[{"AttributeName": "event_id", "KeyType": "HASH"}],
+                AttributeDefinitions=[{"AttributeName": "event_id", "AttributeType": "S"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+        except dynamodb.meta.client.exceptions.ResourceInUseException:
+            pass  # already exists
+
+
 @app.on_event("startup")
 def startup():
     """
@@ -48,6 +62,10 @@ def startup():
             logger.info("Created local DynamoDB table: %s", DYNAMODB_TABLE)
         except dynamodb.meta.client.exceptions.ResourceInUseException:
             pass  # table already exists — fine
+        except Exception as e:
+            # DynamoDB Local may not be ready yet — don't crash the service.
+            # The table will be created on the first POST /audit request via ensure_table().
+            logger.warning("Could not create DynamoDB table at startup: %s", e)
     logger.info("audit-service started")
 
 
@@ -81,6 +99,7 @@ def log_event(event: AuditEventIn):
         item["metadata"] = event.metadata
 
     try:
+        ensure_table()
         get_table().put_item(Item=item)
     except Exception as exc:
         logger.error("DynamoDB put_item failed: %s", exc)

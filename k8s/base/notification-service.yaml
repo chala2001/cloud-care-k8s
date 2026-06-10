@@ -1,37 +1,33 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: audit-service
+  name: notification-service
   namespace: dev
   labels:
-    app: audit-service
+    app: notification-service
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: audit-service
+      app: notification-service
   template:
     metadata:
       labels:
-        app: audit-service
+        app: notification-service
     spec:
       containers:
-        - name: audit-service
-          image: audit-service:local
+        - name: notification-service
+          image: notification-service:local
           imagePullPolicy: Never
           ports:
-            - containerPort: 8003
+            - containerPort: 8004
           env:
-            - name: DYNAMODB_TABLE
-              value: "audit_events"
+            - name: LOCAL_DEV
+              value: "true"             # logs emails to console instead of sending via SES
+            - name: SES_FROM_ADDRESS
+              value: "noreply@cloudcare.local"
             - name: AWS_DEFAULT_REGION
               value: "ap-south-1"
-            - name: DYNAMODB_ENDPOINT_URL
-              value: "http://dynamodb-local:8000"   # minikube only; removed in prod (uses real DynamoDB via IRSA)
-            - name: AWS_ACCESS_KEY_ID
-              value: "local"                        # minikube only — fake credentials for DynamoDB Local
-            - name: AWS_SECRET_ACCESS_KEY
-              value: "local"                        # minikube only
           resources:
             requests:
               memory: "64Mi"
@@ -42,25 +38,25 @@ spec:
           readinessProbe:
             httpGet:
               path: /health
-              port: 8003
+              port: 8004
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
-              port: 8003
+              port: 8004
             initialDelaySeconds: 15
             periodSeconds: 20
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: audit-service
+  name: notification-service
   namespace: dev
 spec:
   selector:
-    app: audit-service
+    app: notification-service
   ports:
-    - port: 8003
-      targetPort: 8003
+    - port: 8004
+      targetPort: 8004
   type: ClusterIP

@@ -1,0 +1,53 @@
+# Number of pod replicas
+replicaCount: 1
+
+# Docker image configuration
+image:
+  repository: ""               # set per-environment or via --set
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8001
+
+# Resource requests and limits
+resources:
+  requests:
+    memory: "64Mi"
+    cpu: "50m"
+  limits:
+    memory: "128Mi"
+    cpu: "200m"
+
+# Health check paths
+healthCheck:
+  path: /health
+  port: 8001
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# Environment variables (non-secret)
+env:
+  DB_SCHEMA: "patients"
+  LOG_LEVEL: "INFO"
+
+# HPA (Horizontal Pod Autoscaler) — disabled by default
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+# External Secrets configuration
+externalSecret:
+  enabled: false           # only in production (Doc 07)
+  secretStoreRef:
+    name: aws-secrets-store
+    kind: ClusterSecretStore
+  refreshInterval: "1h"
+  remoteSecretName: ""     # e.g. cloudcare-k8s/patient-service/db
+
+# Database URL — for local dev only; in prod this comes from ExternalSecret
+databaseUrl: ""
