@@ -15,7 +15,7 @@ services:
       POSTGRES_USER:     admin
       POSTGRES_PASSWORD: local_password
     ports:
-      - "5432:5432"    # expose to host for psql / pgAdmin access
+      - "5433:5432"    # 5433 on host → 5432 inside container (5432 taken by compliance portal)
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql   # run on first start

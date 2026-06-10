@@ -305,6 +305,8 @@ spec:
               value: "http://patient-service:8001"   # cluster DNS
             - name: AUDIT_SERVICE_URL
               value: "http://audit-service:8003"
+            - name: NOTIFICATION_SERVICE_URL
+              value: "http://notification-service:8004"
           resources:
             requests:
               memory: "64Mi"
@@ -352,15 +354,25 @@ stringData:
 
 ## 5. audit-service and notification-service Manifests
 
-These follow the same pattern but are **internal only** (ClusterIP, no Ingress rule).
+These are **internal only** (ClusterIP, no Ingress rule) — they are never reachable from
+the public internet. But they must still run as pods in the cluster because other services
+call them over the cluster's internal network.
 
-`k8s/base/audit-service.yaml` (key parts):
+> 🧠 **notification-service is not public, but it still needs a k8s manifest.**
+> appointment-service calls `http://notification-service:8004/notify` internally.
+> Without a Deployment and Service in the cluster, that call fails with "connection refused".
+
+### audit-service
+
+`k8s/base/audit-service.yaml`:
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: audit-service
   namespace: dev
+  labels:
+    app: audit-service
 spec:
   replicas: 1
   selector:
@@ -383,7 +395,11 @@ spec:
             - name: AWS_DEFAULT_REGION
               value: "ap-south-1"
             - name: DYNAMODB_ENDPOINT_URL
-              value: "http://dynamodb-local:8000"   # local dev only
+              value: "http://dynamodb-local:8000"   # minikube only; removed in prod (uses real DynamoDB via IRSA)
+            - name: AWS_ACCESS_KEY_ID
+              value: "local"                        # minikube only — fake credentials for DynamoDB Local
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "local"                        # minikube only
           resources:
             requests:
               memory: "64Mi"
@@ -391,6 +407,218 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "200m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-service
+  namespace: dev
+spec:
+  selector:
+    app: audit-service
+  ports:
+    - port: 8003
+      targetPort: 8003
+  type: ClusterIP
+```
+
+### notification-service
+
+`k8s/base/notification-service.yaml`:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: dev
+  labels:
+    app: notification-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      containers:
+        - name: notification-service
+          image: notification-service:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8004
+          env:
+            - name: LOCAL_DEV
+              value: "true"             # logs emails to console instead of sending via SES
+            - name: SES_FROM_ADDRESS
+              value: "noreply@cloudcare.local"
+            - name: AWS_DEFAULT_REGION
+              value: "ap-south-1"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8004
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8004
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: dev
+spec:
+  selector:
+    app: notification-service
+  ports:
+    - port: 8004
+      targetPort: 8004
+  type: ClusterIP
+```
+
+> **In production**, `LOCAL_DEV` is removed and the pod uses IRSA to call real AWS SES
+> (Doc 07 covers IRSA). For minikube, `LOCAL_DEV=true` causes emails to be printed to
+> the pod's logs instead.
+
+---
+
+## 5b. Infrastructure Manifests (minikube only)
+
+In Docker Compose, postgres and DynamoDB Local ran as containers. In Kubernetes they
+also run as pods — but we need Deployment + Service manifests for them too.
+
+> 🧠 **This is minikube-only.** In the real EKS cluster (Doc 05), postgres is replaced
+> by **RDS** (managed by Terraform) and DynamoDB is real AWS DynamoDB accessed via IRSA.
+> These infrastructure manifests are for local testing only.
+
+First, create a ConfigMap from the `init.sql` file we wrote in Doc 02:
+```bash
+kubectl create configmap postgres-init \
+  --from-file=init.sql=services/init.sql \
+  --namespace dev
+```
+
+`k8s/base/infrastructure.yaml`:
+```yaml
+# ── PostgreSQL ──────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: dev
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: "cloudcare"
+            - name: POSTGRES_USER
+              value: "admin"
+            - name: POSTGRES_PASSWORD
+              value: "local_password"
+          volumeMounts:
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "admin", "-d", "cloudcare"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: init-sql
+          configMap:
+            name: postgres-init     # created from services/init.sql above
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: dev
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+# ── DynamoDB Local ──────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamodb-local
+  namespace: dev
+  labels:
+    app: dynamodb-local
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamodb-local
+  template:
+    metadata:
+      labels:
+        app: dynamodb-local
+    spec:
+      containers:
+        - name: dynamodb-local
+          image: amazon/dynamodb-local:2.3.0
+          command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamodb-local
+  namespace: dev
+spec:
+  selector:
+    app: dynamodb-local
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
 ```
 
 ---
@@ -456,10 +684,21 @@ for svc in patient-service appointment-service audit-service notification-servic
   (cd services/$svc && docker build -t $svc:local .)
 done
 
-# Create namespaces
+# Create namespaces first
 kubectl apply -f k8s/base/namespaces.yaml
 
-# Apply all service manifests
+# Create ConfigMap from init.sql (postgres needs this to create schemas on first start)
+kubectl create configmap postgres-init \
+  --from-file=init.sql=services/init.sql \
+  --namespace dev
+
+# Apply infrastructure (postgres + dynamodb-local) — services depend on these
+kubectl apply -f k8s/base/infrastructure.yaml
+
+# Wait for postgres to be ready before applying services
+kubectl rollout status deployment/postgres -n dev
+
+# Apply all four service manifests
 kubectl apply -f k8s/base/patient-service.yaml
 kubectl apply -f k8s/base/appointment-service.yaml
 kubectl apply -f k8s/base/audit-service.yaml

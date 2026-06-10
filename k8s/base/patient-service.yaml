@@ -1,0 +1,76 @@
+# --- Deployment ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: patient-service
+  namespace: dev
+  labels:
+    app: patient-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: patient-service        # must match template labels
+  template:
+    metadata:
+      labels:
+        app: patient-service      # pods get this label
+    spec:
+      containers:
+        - name: patient-service
+          image: patient-service:local    # minikube local image
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8001
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: patient-service-db-secret
+                  key: DATABASE_URL
+            - name: DB_SCHEMA
+              value: "patients"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+# --- Service ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: patient-service
+  namespace: dev
+spec:
+  selector:
+    app: patient-service           # routes to pods with this label
+  ports:
+    - protocol: TCP
+      port: 8001                   # port on the Service (what callers use)
+      targetPort: 8001             # port on the pod
+  type: ClusterIP                  # internal only
+---
+# --- Secret (local dev only — see Doc 07 for production) ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: patient-service-db-secret
+  namespace: dev
+type: Opaque
+stringData:                        # stringData auto-encodes to base64
+  DATABASE_URL: "postgresql://patient_svc:patient_pass@postgres:5432/cloudcare"
