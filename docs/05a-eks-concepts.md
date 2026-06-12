@@ -103,17 +103,19 @@ In CloudCare-k8s, the structure is the same but the private subnets now hold
 ```
 ap-south-1 VPC (10.0.0.0/16)
 │
-├── Public Subnet A (10.0.0.0/24)  — ap-south-1a  ┐ Layer 1: public
-├── Public Subnet B (10.0.1.0/24)  — ap-south-1b  ┘ NAT instance, ALB
+├── Public Subnet A (10.0.0.0/24) — ap-south-1a
+│   └── NAT instance (t3.micro — outbound internet for private subnets)
 │
-├── Private Subnet A (10.0.10.0/24) — ap-south-1a ┐ Layer 2: app
-├── Private Subnet B (10.0.11.0/24) — ap-south-1b ┘ EKS nodes (pods run here)
+├── Public Subnet B (10.0.1.0/24) — ap-south-1b
+│   └── ALB (created by Ingress Controller when you apply Ingress YAML)
 │
-├── DB Subnet A (10.0.20.0/24) — ap-south-1a       ┐ Layer 3: database
-└── DB Subnet B (10.0.21.0/24) — ap-south-1b       ┘ RDS only — no internet access
+├── Private Subnet A (10.0.10.0/24) — ap-south-1a
+│   └── EKS Node 1 (pods run here, pulls images via NAT → ECR)
+│
+└── Private Subnet B (10.0.11.0/24) — ap-south-1b
+    └── EKS Node 2 (pods run here)
+    └── RDS (postgres — also in private subnet)
 ```
-
-6 subnets total — 2 per layer, same 3-layer pattern as cloud-care v1.
 
 ### Why 2 subnets in 2 Availability Zones?
 
