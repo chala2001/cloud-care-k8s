@@ -192,12 +192,11 @@ resource "aws_subnet" "public" {
   }
 }
 
-# ── Private Subnets (2 — one per AZ) ─────────────────────────────────────────
+# ── Private Subnets / App Layer (2 — one per AZ) ─────────────────────────────
 resource "aws_subnet" "private" {
   count             = 2
   vpc_id            = aws_vpc.main.id
   cidr_block        = cidrsubnet("10.0.0.0/16", 8, count.index + 10)
-  # count.index + 10 avoids overlap with public subnets
   # count.index = 0 → 10.0.10.0/24
   # count.index = 1 → 10.0.11.0/24
   availability_zone = data.aws_availability_zones.available.names[count.index]
@@ -207,6 +206,22 @@ resource "aws_subnet" "private" {
     "kubernetes.io/role/internal-elb" = "1"
     # tells ALB Ingress Controller: "create internal ALBs in these subnets"
     "kubernetes.io/cluster/cloudcare-k8s" = "shared"
+  }
+}
+
+# ── Database Subnets (2 — one per AZ) ────────────────────────────────────────
+resource "aws_subnet" "database" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet("10.0.0.0/16", 8, count.index + 20)
+  # count.index = 0 → 10.0.20.0/24
+  # count.index = 1 → 10.0.21.0/24
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  # separate layer from the app/EKS layer — matches the 3-layer pattern from cloud-care v1
+  # only RDS lives here. security group on RDS allows port 5432 from private subnets only.
+
+  tags = {
+    Name = "cloudcare-k8s-db-${count.index}"
   }
 }
 
@@ -225,19 +240,24 @@ resource "aws_route_table_association" "public" {
   count          = 2
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
-  # associate both public subnets with the public route table
 }
 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
-  # private route table starts with no routes
-  # the NAT route is added in nat.tf after the NAT instance is created
+  # NAT route is added in nat.tf after the NAT instance is created
   tags = { Name = "cloudcare-k8s-private-rt" }
 }
 
 resource "aws_route_table_association" "private" {
   count          = 2
   subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+# DB subnets reuse the private route table — no internet access needed for RDS
+resource "aws_route_table_association" "database" {
+  count          = 2
+  subnet_id      = aws_subnet.database[count.index].id
   route_table_id = aws_route_table.private.id
 }
 ```
@@ -569,6 +589,11 @@ output "public_subnet_ids" {
   value = aws_subnet.public[*].id
 }
 
+output "db_subnet_ids" {
+  value = aws_subnet.database[*].id
+  # platform stack uses this for the RDS subnet group
+}
+
 output "cluster_name" {
   value = aws_eks_cluster.main.name
 }
@@ -615,8 +640,9 @@ data "terraform_remote_state" "eks" {
 # ── Subnet Group: which subnets RDS can use ───────────────────────────────────
 resource "aws_db_subnet_group" "main" {
   name       = "cloudcare-k8s-db"
-  subnet_ids = data.terraform_remote_state.eks.outputs.private_subnet_ids
-  # RDS lives in private subnets — no public access
+  subnet_ids = data.terraform_remote_state.eks.outputs.db_subnet_ids
+  # RDS lives in the dedicated database subnet layer (10.0.20.x, 10.0.21.x)
+  # separate from EKS nodes — matches the 3-layer design from cloud-care v1
 }
 
 # ── Security Group: who can connect to RDS ───────────────────────────────────
