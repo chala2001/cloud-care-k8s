@@ -6,8 +6,8 @@
 > engineering teams actually run production workloads.
 
 **Region** `ap-south-1` (Mumbai) · **IaC** Terraform 1.9+ · **Orchestration** Kubernetes 1.30 on EKS ·
-**Backend** Python 3.12 + FastAPI (4 microservices) · **Frontend** React 18 + Vite ·
-**CI/CD** GitHub Actions + OIDC · **Observability** Prometheus + Grafana + Loki
+**Backend** Python 3.12 + FastAPI (4 microservices) · **CI/CD** GitHub Actions + OIDC ·
+**Observability** Prometheus + Grafana + Loki
 
 ---
 
@@ -17,10 +17,16 @@ This project demonstrates **Kubernetes, microservices operations, and cloud-nati
 The hospital management app (patients, appointments) is intentionally minimal CRUD — it exists to
 give the infrastructure something real to host and operate.
 
-> **UI/UX is out of scope.** The web frontend proves the stack is wired up end-to-end
-> (`CloudFront → S3` for assets, `CloudFront → ALB Ingress → EKS services → RDS` for the API).
-> To evaluate this project, read the Terraform stacks, Helm charts, GitHub Actions workflows,
-> and the architecture sections below.
+> **No frontend in this repo.**
+> The React frontend and its CDN infrastructure (S3 + CloudFront + GitHub Actions deploy workflow)
+> live entirely in the companion **[cloud-care](../cloud-care)** repository (v1).
+> This repo is 100% backend: microservices, Kubernetes, Helm, EKS, and CI/CD for those services.
+>
+> In a real production setup the same React SPA from v1 would point its `/api/*` calls at
+> the ALB Ingress in this cluster — the frontend itself needs no changes. That's why we
+> don't duplicate it here.
+>
+> To evaluate this project, read the Terraform stacks, Helm charts, and GitHub Actions workflows.
 
 ---
 
@@ -78,12 +84,12 @@ Twenty-eight tools, grouped by what they do in the system.
       <sub>EKS t3.micro node group; one ECR repo per service; AWS ALB Ingress Controller routes external traffic; NAT instance saves ~$32/mo vs NAT Gateway.</sub>
     </td>
     <td width="33%" valign="top">
-      <h4>Edge</h4>
+      <h4>Edge (v1 — cloud-care repo)</h4>
       <p>
         <img src="https://img.shields.io/badge/CloudFront-8C4FFF?style=for-the-badge" alt="CloudFront"/>
         <img src="https://img.shields.io/badge/S3%20%28static%29-569A31?style=for-the-badge&logo=amazons3&logoColor=white" alt="S3 static"/>
       </p>
-      <sub>One HTTPS origin for the whole app; React SPA served from private S3 via Origin Access Control; API requests forwarded to ALB Ingress.</sub>
+      <sub>Defined in the companion cloud-care (v1) repo — not in this repo. CloudFront serves the React SPA from private S3 and forwards /api/* to this cluster's ALB Ingress.</sub>
     </td>
   </tr>
   <tr>
@@ -122,10 +128,8 @@ Twenty-eight tools, grouped by what they do in the system.
       <h4>Application</h4>
       <p>
         <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI"/>
-        <img src="https://img.shields.io/badge/React%2018-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React"/>
-        <img src="https://img.shields.io/badge/Vite-646CFF?style=for-the-badge&logo=vite&logoColor=white" alt="Vite"/>
       </p>
-      <sub>Python 3.12 microservices, React 18 SPA built with Vite — the simplest CRUD needed to wire the stack.</sub>
+      <sub>4 Python 3.12 FastAPI microservices — the simplest CRUD needed to give the Kubernetes infrastructure something real to run. No frontend code in this repo.</sub>
     </td>
     <td width="33%" valign="top">
       <h4>Local Dev</h4>
@@ -543,44 +547,197 @@ flowchart TB
 
 ## CI/CD pipeline
 
-One workflow per service. GitHub Actions authenticates to AWS via OIDC — no long-lived
-AWS keys are ever stored in GitHub.
+### Authentication — no stored AWS keys
 
-```mermaid
-flowchart LR
-    Dev([Developer]) -->|push / PR| GH[GitHub Repo]
+Every workflow authenticates to AWS using **OIDC** (OpenID Connect). GitHub generates
+a short-lived JWT per workflow run. AWS STS exchanges it for 15-minute temporary
+credentials scoped to the `cloudcare-k8s-github-deploy` IAM role.
+No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` is stored anywhere in GitHub.
 
-    subgraph GHA["GitHub Actions"]
-        TF["terraform.yml\nplan on PR · apply on main"]
-        WPS["patient-service.yml\nbuild · push · helm upgrade"]
-        WAS["appointment-service.yml\nbuild · push · helm upgrade"]
-        WAU["audit-service.yml\nbuild · push · helm upgrade"]
-        WNS["notification-service.yml\nbuild · push · helm upgrade"]
-        WFE["frontend.yml\nbuild · sync · invalidate"]
-    end
-
-    GH --> TF & WPS & WAS & WAU & WNS & WFE
-
-    TF & WPS & WAS & WAU & WNS & WFE -- "OIDC\nAssumeRoleWithWebIdentity" --> STS[(AWS STS)]
-
-    STS --> Role["IAM role\ncloudcare-k8s-github-deploy\n(trust: repo · refs/heads/main · PR)"]
-
-    Role --> ECR["ECR push\n(image:git-sha)"]
-    Role --> HELM["helm upgrade --install\n(dev → prod with approval gate)"]
-    Role --> S3O["S3 sync\n(frontend assets)"]
-    Role --> CFI["CloudFront invalidation"]
-    Role --> TFA["terraform apply"]
+```
+GitHub Actions JWT  →  AWS STS AssumeRoleWithWebIdentity  →  15-min temp credentials
+(auto-generated        (verified against OIDC provider             (scoped to one role,
+ per job run)           registered in terraform/eks/oidc.tf)        expires automatically)
 ```
 
-| Trigger | Workflow | What runs |
-|---------|----------|-----------|
-| PR touches `terraform/**` | `terraform.yml` | `terraform plan` for every stack |
-| Push to `main`, `terraform/**` | `terraform.yml` | `terraform apply` (bootstrap → eks → platform) |
-| Push to `main`, `services/patient-service/**` | `patient-service.yml` | `docker build/push :git-sha` + `helm upgrade` to dev, then prod (with approval) |
-| Push to `main`, `services/appointment-service/**` | `appointment-service.yml` | same as above |
-| Push to `main`, `services/audit-service/**` | `audit-service.yml` | same as above |
-| Push to `main`, `services/notification-service/**` | `notification-service.yml` | same as above |
-| Push to `main`, `frontend/**` | `frontend.yml` | `npm run build` + `s3 sync` + CloudFront invalidate |
+The OIDC trust policy is pinned to `repo:chala2001/cloud-care-k8s:*` — no other
+repository can assume this role.
+
+---
+
+### First-time setup — must be manual
+
+The OIDC provider and `github_deploy` IAM role are created by Terraform. Until Terraform
+runs, GitHub Actions has nothing to authenticate against. This is a one-time bootstrap:
+
+```
+1. terraform apply (eks)       ← run manually from your laptop
+      creates: OIDC provider, github_deploy IAM role, ECR repos, EKS cluster
+
+2. terraform apply (platform)  ← run manually from your laptop
+      creates: RDS, Secrets Manager secrets, ALB controller, ESO
+
+3. From this point forward — GitHub Actions handles all future infrastructure
+   and service changes automatically.
+```
+
+---
+
+### Branch strategy
+
+```
+feature/xyz  ──●──●──●
+                        \
+dev          ─────────────●──────────────●──────
+                          ↑              \
+                   merge: test here        \
+                   (EKS dev namespace)      \
+main         ────────────────────────────────●──
+                                             ↑
+                                      merge: goes to prod
+                                      (EKS prod namespace)
+```
+
+| Branch | Purpose | Protected? |
+|--------|---------|-----------|
+| `main` | Production — what real users see | Yes — PR required |
+| `dev` | Staging — integration test before prod | Recommended |
+| `feature/*` | Your active work — private until pushed | No |
+
+---
+
+### Git workflow — step by step
+
+```bash
+# 1. Start from dev (never work directly on main)
+git checkout dev && git pull origin dev
+
+# 2. Create a feature branch
+git checkout -b feature/your-feature-name
+
+# 3. Make changes, commit
+git add .
+git commit -m "describe what changed"
+
+# 4. Push feature branch — triggers NOTHING in CI/CD
+git push -u origin feature/your-feature-name
+
+# 5. Open PR on GitHub: feature/your-feature-name → dev
+#    If terraform/ files changed: terraform plan runs and posts output as PR comment
+#    Service workflows: do not run on PRs, only on branch push
+
+# 6. Merge PR into dev
+#    → If service code changed: build image → push to ECR → helm deploy to EKS dev namespace
+#    → If terraform/ changed: terraform plan only (apply is blocked on dev)
+#    Test the result in the dev namespace
+
+# 7. Open PR: dev → main
+#    If terraform/ changed: terraform plan runs again as PR comment (final review)
+
+# 8. Merge PR into main
+#    → If service code changed: build image → push to ECR → helm deploy to EKS prod namespace
+#    → If terraform/ changed: terraform apply runs (real AWS infrastructure changes)
+```
+
+---
+
+### What triggers what — full map
+
+| Event | Branch | Files changed | Workflow | What it does |
+|-------|--------|---------------|----------|--------------|
+| Open PR | any → dev/main | `terraform/**` | `terraform.yml` | `terraform plan` — posts output as PR comment, no changes applied |
+| Open PR | any → dev/main | `services/*/**` | nothing | service workflows don't run on PRs |
+| Merge / push | `dev` | `services/patient-service/**` | `deploy-patient-service.yml` | build → push ECR `:git-sha` → `helm upgrade` to **dev** namespace |
+| Merge / push | `dev` | `services/appointment-service/**` | `deploy-appointment-service.yml` | build → push ECR `:git-sha` → `helm upgrade` to **dev** namespace |
+| Merge / push | `dev` | `services/audit-service/**` | `deploy-audit-service.yml` | build → push ECR `:git-sha` → `helm upgrade` to **dev** namespace |
+| Merge / push | `dev` | `services/notification-service/**` | `deploy-notification-service.yml` | build → push ECR `:git-sha` → `helm upgrade` to **dev** namespace |
+| Merge / push | `dev` | `terraform/**` | `terraform.yml` | `terraform plan` only — no apply on dev |
+| Merge / push | `main` | `services/patient-service/**` | `deploy-patient-service.yml` | build → push ECR `:git-sha` → `helm upgrade` to **prod** namespace |
+| Merge / push | `main` | `services/appointment-service/**` | `deploy-appointment-service.yml` | build → push ECR `:git-sha` → `helm upgrade` to **prod** namespace |
+| Merge / push | `main` | `services/audit-service/**` | `deploy-audit-service.yml` | build → push ECR `:git-sha` → `helm upgrade` to **prod** namespace |
+| Merge / push | `main` | `services/notification-service/**` | `deploy-notification-service.yml` | build → push ECR `:git-sha` → `helm upgrade` to **prod** namespace |
+| Merge / push | `main` | `terraform/**` | `terraform.yml` | `terraform apply` (eks stack first, then platform) |
+| Push `feature/*` | any | any | nothing | feature branches are not watched |
+
+---
+
+### Service deploy pipeline — inside each workflow
+
+Every service workflow has 3 jobs. Branch determines which deploy job runs:
+
+```
+build job (always runs)
+  ├── docker build -t ecr-url/cloudcare-k8s-<service>:<git-sha> .
+  ├── docker push :git-sha    ← immutable tag — used for rollback
+  └── docker push :latest     ← mutable tag — convenient for local pulls
+
+deploy-dev job (only when branch = dev)
+  ├── helm upgrade --install <service> ./helm/<service>
+  │     -f values-dev.yaml              ← 1 replica, DEBUG logs, no HPA, local secrets
+  │     --set image.tag=<git-sha>
+  │     --namespace dev
+  └── kubectl rollout status            ← fails the job if pods don't become Ready
+
+deploy-prod job (only when branch = main)
+  ├── helm upgrade --install <service> ./helm/<service>
+  │     -f values-prod.yaml             ← 2 replicas, HPA enabled, ESO secrets, WARNING logs
+  │     --set image.tag=<git-sha>
+  │     --namespace prod
+  └── kubectl rollout status
+```
+
+The image is **always rebuilt** on every merge — every commit has a unique git SHA,
+so a new tag is always produced. Images are never reused between branches.
+
+---
+
+### Terraform pipeline — inside terraform.yml
+
+```
+eks job
+  ├── terraform init      (downloads providers, connects to S3 backend)
+  ├── terraform validate  (syntax check — no AWS calls)
+  ├── terraform plan      (always runs — shows what would change)
+  └── terraform apply     (ONLY on push to main — never on PRs or dev branch)
+
+platform job (needs: eks — waits for eks job to finish)
+  ├── same steps as eks job
+  └── reads eks outputs (VPC IDs, cluster name) via terraform_remote_state
+```
+
+`terraform apply` is gated to `main` branch only. Every PR shows the plan
+as a comment — you see exactly what AWS resources will change before merging.
+
+---
+
+### Pipeline architecture diagram
+
+```mermaid
+flowchart TD
+    Dev([Developer])
+
+    Dev -->|"git push -u origin feature/xyz\n(triggers nothing)"| FEAT["feature/* branch"]
+    FEAT -->|"Open PR → dev"| PR1{"PR event\n(dev)"}
+    PR1 -->|"terraform/** changed"| PLAN1["terraform plan\n→ post as PR comment"]
+    PR1 -->|"service code changed"| SKIP["no service workflow\n(PRs don't deploy)"]
+
+    FEAT -->|"Merge PR"| DEV["dev branch\npush event"]
+    DEV -->|"services/patient-service/**"| BD["build job\ndocker build + push :git-sha to ECR"]
+    BD --> DD["deploy-dev job\nhelm upgrade → EKS dev namespace\nvalues-dev.yaml"]
+    DEV -->|"terraform/**"| TP_DEV["terraform plan only\n(no apply on dev)"]
+
+    DEV -->|"Open PR → main"| PR2{"PR event\n(main)"}
+    PR2 -->|"terraform/** changed"| PLAN2["terraform plan\n→ post as PR comment"]
+
+    DEV -->|"Merge PR"| MAIN["main branch\npush event"]
+    MAIN -->|"services/patient-service/**"| BP["build job\ndocker build + push :git-sha to ECR"]
+    BP --> DP["deploy-prod job\nhelm upgrade → EKS prod namespace\nvalues-prod.yaml"]
+    MAIN -->|"terraform/**"| TA["terraform apply\neks stack → platform stack"]
+
+    BD & BP -->|"OIDC"| STS["AWS STS\nAssumeRoleWithWebIdentity"]
+    DD & DP & TA -->|"OIDC"| STS
+    STS --> ROLE["IAM role\ncloudcare-k8s-github-deploy\n15-min temp credentials"]
+```
 
 ---
 
@@ -658,11 +815,6 @@ cloud-care-k8s/
 │   ├── docker-compose.yml             ← local dev: all 4 services + postgres
 │   └── init.sql                       ← schema seeds for local postgres
 │
-├── frontend/                          ← React 18 + Vite
-│   ├── src/
-│   ├── index.html
-│   └── package.json
-│
 ├── helm/                              ← one Helm chart per service
 │   └── patient-service/
 │       ├── chart.yml
@@ -698,12 +850,12 @@ cloud-care-k8s/
 │   └── loki/                          ← Loki + Promtail config
 │
 ├── .github/workflows/
-│   ├── patient-service.yml
-│   ├── appointment-service.yml
-│   ├── audit-service.yml
-│   ├── notification-service.yml
-│   ├── frontend.yml
-│   └── terraform.yml
+│   ├── deploy-patient-service.yml     ← build → ECR → helm upgrade (per service)
+│   ├── deploy-appointment-service.yml
+│   ├── deploy-audit-service.yml
+│   ├── deploy-notification-service.yml
+│   └── terraform.yml                  ← plan on PR, apply on main
+│   (no frontend.yml — frontend deploy lives in cloud-care/)
 │
 └── docs/                              ← 11 numbered guides, one per phase
     ├── 00-roadmap.md
@@ -730,7 +882,6 @@ cloud-care-k8s/
 - **kubectl** + **Helm 3** (`helm version`)
 - **Docker Desktop** (includes Docker Compose)
 - **minikube** or **kind** for local Kubernetes dev
-- **Node.js 20+** (for the frontend)
 - **Python 3.12** (for local backend dev — Docker is enough)
 
 ---
@@ -791,25 +942,19 @@ done
 kubectl get pods -n prod -w  # watch all pods reach Running
 ```
 
-### Phase 4 — Deploy frontend
+### Phase 4 — Verify
 
 ```bash
-BUCKET=$(cd terraform/platform && terraform output -raw frontend_bucket)
-DIST=$(cd terraform/platform && terraform output -raw cloudfront_distribution_id)
+# Get the ALB DNS name from the Ingress
+kubectl get ingress -n prod
 
-cd frontend && npm ci && npm run build
-aws s3 sync dist/ "s3://$BUCKET/" --delete
-aws cloudfront create-invalidation --distribution-id "$DIST" --paths "/*"
-```
+# Hit the API directly via ALB
+ALB=$(kubectl get ingress -n prod -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+curl "http://$ALB/api/patients"
+curl "http://$ALB/api/appointments"
 
-### Phase 5 — Verify
-
-```bash
-CF=$(cd terraform/platform && terraform output -raw cloudfront_domain_name)
-echo "Open https://$CF/  — that's CloudCare-K8s."
-
-curl "https://$CF/api/patients"
-curl "https://$CF/api/appointments"
+# To wire a frontend, point the cloud-care React app's VITE_API_URL at this ALB.
+# That frontend lives in the companion cloud-care/ repo.
 ```
 
 ---
