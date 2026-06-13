@@ -1,10 +1,10 @@
 terraform {
   backend "s3" {
-    bucket         = "cloudcare-k8s-tfstate-<your-account-id>"  # replace with your bucket name
-    key            = "eks/terraform.tfstate"    # path inside the bucket for THIS stack's state
-    region         = "ap-south-1"
-    dynamodb_table = "cloudcare-k8s-tfstate-670794226080"
-    encrypt        = true    # encrypt state at rest (matches bucket encryption)
+    bucket       = "cloudcare-k8s-tfstate-670794226080"
+    key          = "eks/terraform.tfstate"    # path inside the bucket for THIS stack's state
+    region       = "ap-south-1"
+    use_lockfile = true    # replaces deprecated dynamodb_table parameter
+    encrypt      = true
   }
 
   required_providers {
