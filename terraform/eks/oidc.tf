@@ -77,3 +77,23 @@ resource "aws_iam_role_policy" "github_deploy" {
     ]
   })
 }
+resource "aws_iam_role_policy" "github_terraform" {
+  name = "cloudcare-k8s-github-terraform-policy"
+  role = aws_iam_role.github_deploy.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ec2:*", "eks:*", "ecr:*", "iam:*",
+                    "rds:*", "secretsmanager:*", "s3:*",
+                    "dynamodb:*", "elasticloadbalancing:*"]
+        Resource = "*"
+        # broad permissions for Terraform to manage all infrastructure
+        # in a real project you'd scope these more tightly
+        # for a learning project this is acceptable
+      }
+    ]
+  })
+}

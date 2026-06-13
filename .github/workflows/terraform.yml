@@ -1,0 +1,163 @@
+name: Terraform Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - "terraform/**"                  # any change inside terraform/ triggers this
+      - ".github/workflows/terraform.yml"
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+    # on a Pull Request: run terraform plan (preview only — no apply)
+    # on merge to main: run terraform apply
+
+env:
+  AWS_REGION: ap-south-1
+  TF_STATE_BUCKET: cloudcare-k8s-tfstate-670794226080
+
+jobs:
+
+  # ── Job 1: Plan and apply eks stack ──────────────────────────────────────────
+  eks:
+    name: EKS Stack — ${{ github.event_name == 'pull_request' && 'Plan' || 'Apply' }}
+    # job name shows "Plan" on PRs and "Apply" on pushes — easier to read in GitHub UI
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write    # needed to post terraform plan output as a PR comment
+
+    defaults:
+      run:
+        working-directory: terraform/eks    # all run: steps execute from this directory
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"    # pin version — prevents surprise behaviour from upgrades
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::670794226080:role/cloudcare-k8s-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+          # the github_deploy role needs additional permissions for Terraform:
+          # ec2:*, eks:*, iam:*, ecr:* — add these to the role policy in oidc.tf
+
+      - name: Terraform Init
+        run: terraform init
+        # downloads providers, connects to S3 backend for state
+        # uses backend.tf: bucket=cloudcare-k8s-tfstate-670794226080, key=eks/terraform.tfstate
+
+      - name: Terraform Validate
+        run: terraform validate
+        # checks HCL syntax and internal consistency — no AWS calls needed
+        # catches typos and missing required arguments before plan
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan
+        # -no-color: plain text output (GitHub comments don't render ANSI colours)
+        # -out=tfplan: saves the plan to a file so apply uses the exact same plan
+        continue-on-error: true
+        # continue-on-error: plan errors are shown as a PR comment, not a silent failure
+
+      - name: Post plan as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### EKS Stack Plan
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+        # posts the plan output directly on the PR so you can review before merging
+        # you see exactly what will change in AWS before clicking "Merge"
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        # only apply on direct pushes to main (i.e. after PR is merged)
+        # NEVER apply on PRs — we only plan on PRs
+        run: terraform apply -auto-approve tfplan
+        # -auto-approve: skip the interactive "yes" prompt (CI can't type)
+        # tfplan: uses the exact plan file from the plan step — no surprises
+
+  # ── Job 2: Plan and apply platform stack (depends on eks) ────────────────────
+  platform:
+    name: Platform Stack — ${{ github.event_name == 'pull_request' && 'Plan' || 'Apply' }}
+    runs-on: ubuntu-latest
+    needs: eks
+    # platform depends on eks outputs (VPC IDs, cluster name)
+    # wait for eks job to finish before planning/applying platform
+
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    defaults:
+      run:
+        working-directory: terraform/platform
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::670794226080:role/cloudcare-k8s-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Post plan as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### Platform Stack Plan
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -auto-approve tfplan

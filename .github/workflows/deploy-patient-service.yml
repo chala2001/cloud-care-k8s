@@ -1,0 +1,162 @@
+name: Deploy patient-service
+
+on:
+  push:
+    branches:
+      - main    # prod deploy
+      - dev     # dev deploy
+    paths:
+      - "services/patient-service/**"
+      - ".github/workflows/deploy-patient-service.yml"
+      # only runs when patient-service code or this workflow file changes
+      # pushing to appointment-service code does NOT trigger this
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: cloudcare-k8s-patient-service
+  SERVICE_DIR: services/patient-service
+  HELM_CHART: helm/patient-service
+  HELM_RELEASE: patient-service
+
+jobs:
+
+  # ── Job 1: Build and push Docker image ──────────────────────────────────────
+  build:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write    # REQUIRED for OIDC — allows workflow to request a JWT
+      contents: read
+
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: tag
+        run: echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+        # first 7 chars of the git commit SHA — immutable, unique per commit
+        # same image tag used for both dev and prod deploys of the same commit
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::670794226080:role/cloudcare-k8s-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          docker build \
+            -t $REGISTRY/$ECR_REPOSITORY:$TAG \
+            -t $REGISTRY/$ECR_REPOSITORY:latest \
+            $SERVICE_DIR
+          docker push $REGISTRY/$ECR_REPOSITORY:$TAG
+          docker push $REGISTRY/$ECR_REPOSITORY:latest
+          # both dev and prod use the SAME image from ECR
+          # environment differences come from Helm values files, not the image
+
+  # ── Job 2: Deploy to dev namespace (only on dev branch) ─────────────────────
+  deploy-dev:
+    name: Deploy to dev
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/dev'
+    # if: condition — this job ONLY runs when the triggering branch is "dev"
+    # on a push to main, this job is skipped entirely
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::670794226080:role/cloudcare-k8s-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: aws eks update-kubeconfig --name cloudcare-k8s --region $AWS_REGION
+
+      - name: Deploy to dev namespace
+        env:
+          TAG: ${{ needs.build.outputs.image_tag }}
+          REGISTRY: 670794226080.dkr.ecr.ap-south-1.amazonaws.com
+        run: |
+          helm upgrade --install $HELM_RELEASE $HELM_CHART \
+            --namespace dev \
+            --create-namespace \
+            -f $HELM_CHART/values-dev.yaml \
+            --set image.repository=$REGISTRY/$ECR_REPOSITORY \
+            --set image.tag=$TAG \
+            --set image.pullPolicy=Always \
+            --wait --timeout 5m
+          # -f values-dev.yaml: 1 replica, no HPA, plain K8s secrets, DEBUG logging
+          # --set image.pullPolicy=Always: forces ECR image pull even if tag exists on node
+          # this ensures the dev pod always runs the latest pushed image
+
+      - name: Verify dev deploy
+        run: |
+          kubectl rollout status deployment/$HELM_RELEASE -n dev
+          kubectl get pods -n dev -l app=$HELM_RELEASE
+
+  # ── Job 3: Deploy to prod namespace (only on main branch) ───────────────────
+  deploy-prod:
+    name: Deploy to prod
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    # only runs on pushes to main — dev branch pushes skip this job
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::670794226080:role/cloudcare-k8s-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: aws eks update-kubeconfig --name cloudcare-k8s --region $AWS_REGION
+
+      - name: Deploy to prod namespace
+        env:
+          TAG: ${{ needs.build.outputs.image_tag }}
+          REGISTRY: 670794226080.dkr.ecr.ap-south-1.amazonaws.com
+        run: |
+          helm upgrade --install $HELM_RELEASE $HELM_CHART \
+            --namespace prod \
+            --create-namespace \
+            -f $HELM_CHART/values-prod.yaml \
+            --set image.repository=$REGISTRY/$ECR_REPOSITORY \
+            --set image.tag=$TAG \
+            --wait --timeout 5m
+          # -f values-prod.yaml: 2 replicas, HPA enabled, ESO secrets, WARNING logging
+
+      - name: Verify prod deploy
+        run: |
+          kubectl rollout status deployment/$HELM_RELEASE -n prod
+          kubectl get pods -n prod -l app=$HELM_RELEASE
