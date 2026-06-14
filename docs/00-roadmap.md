@@ -51,18 +51,17 @@ Same rhythm as CloudCare v1 — every phase has numbered docs:
 
 ## 3. The Phases at a Glance
 
-| Phase | Doc | Topic | Key tools | Free-tier risk |
-|------:|-----|-------|-----------|----------------|
-| **0** | [00](00-roadmap.md), [01](01-local-setup.md) | Foundations — local setup, Docker Compose, minikube | Docker, minikube, kubectl | ✅ Completely free |
-| **1** | [02](02-microservices-split.md) | Microservices split — 4 independent services | FastAPI, Docker Compose | ✅ Free (local only) |
-| **2** | [03](03-k8s-manifests.md) | Kubernetes manifests — Deployment, Service, Ingress | kubectl, minikube | ✅ Free (local only) |
-| **3** | [04](04-helm-charts.md) | Helm charts — packaging, values, dev/prod overlays | Helm 3 | ✅ Free (local only) |
-| **4** | [05](05-eks-terraform.md) | EKS cluster with Terraform | Terraform, EKS | ⚠️ EKS ~$2.40/day |
-| **5** | [06](06-cicd.md) | CI/CD — per-service GitHub Actions pipelines | GitHub Actions, ECR | ✅ Free |
-| **6** | [07](07-secrets.md) | IRSA + External Secrets Operator | Secrets Manager, ESO | ✅ Free within tier |
-| **7** | [08](08-hpa.md) | HPA — horizontal pod autoscaling | kubectl, Metrics Server | ✅ Free |
-| **8** | [09](09-observability.md) | Prometheus + Grafana + Loki | Helm, Prometheus stack | ✅ Free |
-| **9** | [10](10-multi-env.md) | Multi-environment (dev/prod namespaces) | Kustomize, Helm | ✅ Free |
+| Phase | Doc | Topic | Key tools | Free-tier risk | Status |
+|------:|-----|-------|-----------|----------------|--------|
+| **0** | [00](00-roadmap.md), [01](01-local-setup.md) | Foundations — local setup, Docker Compose, minikube | Docker, minikube, kubectl | ✅ Completely free | ✅ Done |
+| **1** | [02](02-microservices-split.md) | Microservices split — 4 independent services | FastAPI, Docker Compose | ✅ Free (local only) | ✅ Done |
+| **2** | [03a](03a-k8s-concepts.md), [03b](03b-k8s-practice.md) | Kubernetes manifests — Deployment, Service, Ingress | kubectl, minikube | ✅ Free (local only) | ✅ Done |
+| **3** | [04a](04a-helm-concepts.md), [04b](04b-helm-practice.md) | Helm charts — packaging, values, dev/prod overlays | Helm 3 | ✅ Free (local only) | ✅ Done |
+| **4** | [05a](05a-eks-concepts.md), [05b](05b-eks-practice.md) | EKS cluster with Terraform — VPC, nodes, OIDC, ALB Ingress | Terraform, EKS | ⚠️ EKS ~$2.40/day | ✅ Done |
+| **5** | [06a](06a-cicd-concepts.md), [06b](06b-cicd-practice.md) | CI/CD — per-service GitHub Actions pipelines | GitHub Actions, ECR | ✅ Free | 🔲 Pending |
+| **6** | [07a](07a-secrets-concepts.md), [07b](07b-secrets-practice.md) | IRSA + K8s Secrets from Secrets Manager | Secrets Manager, IRSA | ✅ Free within tier | ✅ Done |
+| **7** | [08a](08a-hpa-concepts.md), [08b](08b-hpa-practice.md) | HPA — horizontal pod autoscaling | kubectl, Metrics Server | ✅ Free | 🔲 Pending |
+| **8** | [09-observability](09-observability.md) | Prometheus + Grafana + Loki | Helm, Prometheus stack | ✅ Free | 🔲 Pending |
 
 ---
 
@@ -76,7 +75,8 @@ By the end of this project you will be able to:
 - Package any microservice into a Helm chart with dev and prod value overrides.
 - Provision a production-grade EKS cluster with Terraform (VPC, OIDC, IRSA, node groups).
 - Set up an independent CI/CD pipeline per service that tests, builds, and deploys automatically.
-- Configure External Secrets Operator to sync AWS Secrets Manager credentials into pod envs.
+- Configure IRSA to give individual pods AWS credentials without any stored keys.
+- Create K8s Secrets from Secrets Manager and inject them via `secretKeyRef`.
 - Set up HPA to automatically scale pods under load.
 - Stand up Prometheus + Grafana + Loki and explain what each metric means.
 - Talk fluently about the difference between v1 and v2 and *why* you'd choose Kubernetes.
@@ -90,27 +90,27 @@ Estimated time: **6–8 hours/week** for two months.
 
 ### Month 1 — Local → Kubernetes Fundamentals
 
-- **Week 1:** Doc 01. Get all tools installed. Run all 4 services with Docker Compose.
+- **Week 1 (✅ Done):** Doc 01. Get all tools installed. Run all 4 services with Docker Compose.
   Understand why Docker Compose is not Kubernetes.
-- **Week 2:** Doc 02. Understand the microservices split. Write the FastAPI code for all
+- **Week 2 (✅ Done):** Doc 02. Understand the microservices split. Write the FastAPI code for all
   four services. Run them locally. Understand schema-per-service.
-- **Week 3:** Doc 03. Learn Kubernetes concepts. Write Deployments and Services by hand.
+- **Week 3 (✅ Done):** Doc 03. Learn Kubernetes concepts. Write Deployments and Services by hand.
   Apply them to minikube. Use `kubectl` daily until it's muscle memory.
-- **Week 4:** Doc 04. Package the services into Helm charts. Write `values.yaml`,
+- **Week 4 (✅ Done):** Doc 04. Package the services into Helm charts. Write `values.yaml`,
   `values-dev.yaml`, `values-prod.yaml`. Deploy via `helm upgrade --install`.
 
 ### Month 2 — AWS → CI/CD → Observability
 
-- **Week 5:** Doc 05. Provision the EKS cluster with Terraform. Run `kubectl get nodes`.
-  Understand the 3-stack model. **Destroy EKS after each session.**
-- **Week 6:** Doc 06. Write GitHub Actions pipelines per service. test → build → push → deploy.
-  Manual approval gate for prod.
-- **Week 7:** Doc 07. Set up IRSA and External Secrets Operator. Secrets flow from
-  Secrets Manager into pod env vars — never touch Git.
-- **Week 8:** Doc 08 + 09. Add HPA. Deploy Prometheus + Grafana + Loki. Build dashboards.
-  Set up alerting rules. This is the phase interviewers love.
-- **Buffer:** Doc 10. Multi-environment dev/prod namespaces with Kustomize.
-  Practice `terraform destroy` + full re-deploy until it's boring.
+- **Week 5 (✅ Done):** Doc 05. Provision the EKS cluster with Terraform. All 4 services running
+  on EKS behind an ALB. Nodes in public subnets (t3.small). ALB Ingress Controller installed.
+  VPC ID passed explicitly to Helm (IMDSv2 fix).
+- **Week 6 (🔲 Pending):** Doc 06. Write GitHub Actions pipelines per service.
+  test → build → push → deploy. Manual approval gate for prod.
+- **Week 7 (✅ Done):** Doc 07. IRSA for audit-service (DynamoDB) and notification-service (SES).
+  Manual K8s Secrets from Secrets Manager for DB credentials. DB user initialization via psql pod.
+  Full audit trail working end to end via DynamoDB.
+- **Week 8 (🔲 Pending):** Doc 08 + 09. Add HPA. Deploy Prometheus + Grafana + Loki. Build
+  dashboards. Set up alerting rules. This is the phase interviewers love.
 
 ---
 

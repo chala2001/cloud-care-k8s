@@ -28,13 +28,19 @@ spec:
             - name: {{ $key }}                            # e.g. DB_SCHEMA
               value: {{ $val | quote }}                   # e.g. "patients"
             {{- end }}
-            {{- if not .Values.externalSecret.enabled }}
+            {{- if .Values.databaseSecretName }}
             - name: DATABASE_URL
-              value: {{ .Values.databaseUrl | quote }}    # dev: plain value in YAML
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.databaseSecretName }}
+                  key: DATABASE_URL
+            {{- else if not .Values.externalSecret.enabled }}
+            - name: DATABASE_URL
+              value: {{ .Values.databaseUrl | quote }}
             {{- else }}
             - name: DATABASE_URL
               valueFrom:
-                secretKeyRef:                             # prod: read from K8s Secret
+                secretKeyRef:
                   name: patient-service-db-secret
                   key: DATABASE_URL
             {{- end }}

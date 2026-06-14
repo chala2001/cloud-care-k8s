@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: "123456789.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-audit-service"
+  repository: "670794226080.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-audit-service"
   tag: "latest"
   pullPolicy: Always
 
@@ -20,6 +20,9 @@ env:
 
 # No dynamodbEndpointUrl in prod — uses real AWS DynamoDB
 # No awsAccessKeyId/awsSecretAccessKey — pod uses IRSA to get credentials (Doc 07)
+
+serviceAccount:
+  roleArn: "arn:aws:iam::670794226080:role/cloudcare-k8s-audit-service"
 
 hpa:
   enabled: true

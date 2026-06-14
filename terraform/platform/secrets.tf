@@ -1,13 +1,20 @@
 # ── Random passwords for service-specific DB users ────────────────────────────
-resource "random_password" "patient_db"      { length = 24; special = false }
-resource "random_password" "appointment_db"  { length = 24; special = false }
+resource "random_password" "patient_db" {
+  length  = 24
+  special = false
+}
+
+resource "random_password" "appointment_db" {
+  length  = 24
+  special = false
+}
 
 # ── Secrets Manager secrets — one per service ─────────────────────────────────
 # The External Secrets Operator (ESO) will sync these into Kubernetes Secrets (Doc 07)
 
 resource "aws_secretsmanager_secret" "patient_db" {
-  name = "cloudcare-k8s/patient-service/db"
-  # path format: project/service/type — easy to manage with IAM path-based policies
+  name                    = "cloudcare-k8s/patient-service/db"
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "patient_db" {
@@ -20,7 +27,8 @@ resource "aws_secretsmanager_secret_version" "patient_db" {
 }
 
 resource "aws_secretsmanager_secret" "appointment_db" {
-  name = "cloudcare-k8s/appointment-service/db"
+  name                    = "cloudcare-k8s/appointment-service/db"
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "appointment_db" {

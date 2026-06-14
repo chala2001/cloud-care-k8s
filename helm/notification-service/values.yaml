@@ -32,6 +32,9 @@ env:
 # Leave empty in prod — real SES is used via IRSA
 localDev: ""
 
+serviceAccount:
+  roleArn: ""    # set in values-prod.yaml to the IRSA role ARN
+
 hpa:
   enabled: false
   minReplicas: 1
