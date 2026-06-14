@@ -3,13 +3,29 @@
 > **Read 05a first.** This doc writes every Terraform file for all 3 stacks
 > with every line explained, then applies them in the correct order.
 >
-> ⚠️ **Cost reminder:** EKS = ~$0.10/hr. Destroy at the end of every session.
+> ⚠️ **Cost reminder:** EKS = ~$0.10/hr (~$2.40/day). Destroy at the end of every session.
+
+---
+
+## Issues encountered during this phase (and how we solved them)
+
+Real deployments hit real problems. These are the exact issues we hit and how we fixed them —
+so if you see the same error, you know what to do immediately.
+
+| Issue | Error | Fix |
+|-------|-------|-----|
+| **NodeCreationFailure** | Nodes stuck in `NodeCreationFailure` for 33+ min, never joined the cluster | Moved node group to **public subnets** (direct IGW) — DIY NAT instance couldn't reliably route EKS API endpoint and ECR traffic from private subnets |
+| **OOMKilled pods** | Pods killed immediately, `kubectl describe pod` shows `OOMKilled` | Changed node instance type from `t3.micro` to **`t3.small`** — t3.micro had too little RAM for EKS system pods + app pods |
+| **ALB controller CrashLoopBackOff** | `EC2MetadataError: failed to fetch VPC ID: status code: 401` | Added `vpcId` explicitly to the Helm `set` values in `alb.tf` — IMDSv2 requires a token that the ALB controller pod can't get without extra setup |
+| **Stale Terraform state lock** | `Error acquiring the state lock` from a previous crashed apply | `terraform force-unlock -force <lock-id>` — the lock ID is shown in the error message |
+| **Secrets Manager deletion queue** | `InvalidRequestException: secret already scheduled for deletion` | Added `recovery_window_in_days = 0` to both `aws_secretsmanager_secret` resources in `secrets.tf` |
 
 ---
 
 ## 1. Create the directory structure
 
 ```bash
+# Create all Terraform stack directories
 mkdir -p /home/chalaka/cloud-care-both/cloud-care-k8s/terraform/bootstrap
 mkdir -p /home/chalaka/cloud-care-both/cloud-care-k8s/terraform/eks
 mkdir -p /home/chalaka/cloud-care-both/cloud-care-k8s/terraform/platform
@@ -98,16 +114,21 @@ output "lock_table_name"   { value = aws_dynamodb_table.lock.name }
 
 **Apply bootstrap (one-time only):**
 ```bash
+# Set your AWS credentials
 export AWS_PROFILE=cloudcare-k8s    # your AWS CLI profile
 export AWS_REGION=ap-south-1
 
+# Move to bootstrap directory
 cd terraform/bootstrap
-terraform init    # downloads the AWS provider plugin
+
+# Download the AWS provider plugin
+terraform init
 
 # Get your AWS account ID automatically and use it in the bucket name
 # This guarantees the bucket name is unique (your account ID is unique)
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
+# Create the S3 bucket and DynamoDB lock table
 terraform apply \
   -var="state_bucket_name=cloudcare-k8s-tfstate-${ACCOUNT_ID}"
 
@@ -217,8 +238,7 @@ resource "aws_subnet" "database" {
   # count.index = 0 → 10.0.20.0/24
   # count.index = 1 → 10.0.21.0/24
   availability_zone = data.aws_availability_zones.available.names[count.index]
-  # separate layer from the app/EKS layer — matches the 3-layer pattern from cloud-care v1
-  # only RDS lives here. security group on RDS allows port 5432 from private subnets only.
+  # separate layer: only RDS lives here — EKS nodes cannot reach it without SG rules
 
   tags = {
     Name = "cloudcare-k8s-db-${count.index}"
@@ -244,7 +264,7 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
-  # NAT route is added in nat.tf after the NAT instance is created
+  # No internet route — DB subnets only. EKS nodes are in public subnets with direct IGW access.
   tags = { Name = "cloudcare-k8s-private-rt" }
 }
 
@@ -254,7 +274,7 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private.id
 }
 
-# DB subnets reuse the private route table — no internet access needed for RDS
+# DB subnets use the same private route table — no internet access needed
 resource "aws_route_table_association" "database" {
   count          = 2
   subnet_id      = aws_subnet.database[count.index].id
@@ -262,62 +282,13 @@ resource "aws_route_table_association" "database" {
 }
 ```
 
-### terraform/eks/nat.tf
-
-```hcl
-# Use a t3.micro EC2 instance as NAT instead of NAT Gateway ($32/mo)
-# Worker nodes in private subnets need outbound internet to pull images from ECR
-
-data "aws_ami" "nat" {
-  most_recent = true
-  owners      = ["amazon"]    # only AMIs published by Amazon
-  filter {
-    name   = "name"
-    values = ["amzn-ami-vpc-nat-*"]    # Amazon's pre-configured NAT AMI
-    # this AMI has IP forwarding and masquerading (NAT) already configured
-  }
-}
-
-resource "aws_security_group" "nat" {
-  name   = "cloudcare-k8s-nat"
-  vpc_id = aws_vpc.main.id
-
-  ingress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"               # -1 = all protocols
-    cidr_blocks = ["10.0.0.0/16"]   # accept traffic from anywhere inside the VPC
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]    # allow all outbound (needs to forward traffic to internet)
-  }
-}
-
-resource "aws_instance" "nat" {
-  ami                    = data.aws_ami.nat.id
-  instance_type          = "t3.micro"                      # free tier eligible
-  subnet_id              = aws_subnet.public[0].id         # must be in a PUBLIC subnet
-  vpc_security_group_ids = [aws_security_group.nat.id]
-  source_dest_check      = false
-  # source_dest_check = false is REQUIRED for NAT
-  # normally EC2 drops packets that aren't addressed to it
-  # NAT needs to forward packets destined for the internet → must disable this check
-
-  tags = { Name = "cloudcare-k8s-nat" }
-}
-
-resource "aws_route" "private_nat" {
-  route_table_id         = aws_route_table.private.id
-  destination_cidr_block = "0.0.0.0/0"    # all outbound traffic from private subnets
-  network_interface_id   = aws_instance.nat.primary_network_interface_id
-  # → goes through the NAT instance → out to the internet
-  # EKS nodes use this to pull Docker images from ECR
-}
-```
+> **Why no NAT instance?** The original design placed EKS nodes in private subnets and
+> used a DIY NAT instance (t3.micro) for outbound internet access to ECR and the EKS API.
+> This caused `NodeCreationFailure` — nodes timed out after 33+ minutes waiting to join
+> the cluster. The NAT instance wasn't routing traffic reliably enough. The fix was to
+> move nodes to the public subnets where they have direct IGW access. Security is
+> maintained by Security Groups — no SSH ports are open, and EKS-managed security groups
+> control pod-level traffic. There is no `nat.tf` in this project.
 
 ### terraform/eks/eks.tf
 
@@ -355,15 +326,13 @@ resource "aws_eks_cluster" "main" {
       aws_subnet.public[*].id,    # [*] = all items in the list
       aws_subnet.private[*].id    # EKS needs both public and private subnet IDs
     )
-    endpoint_private_access = true    # kubectl works from inside the VPC (e.g. from a bastion)
+    endpoint_private_access = true    # kubectl works from inside the VPC
     endpoint_public_access  = false   # the K8s API server is NOT reachable from the internet
-    # security best practice: only access kubectl from inside your VPC or via VPN
     security_group_ids = [aws_security_group.eks_cluster.id]
   }
 
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
   # Terraform must attach the IAM policy BEFORE creating the cluster
-  # depends_on makes this ordering explicit
 }
 
 # ── Security Group for EKS Cluster ───────────────────────────────────────────
@@ -410,7 +379,6 @@ resource "aws_iam_role_policy_attachment" "ecr_read_only" {
   role       = aws_iam_role.eks_node.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
   # allows nodes to pull Docker images from ECR
-  # this is how pods get their images without any manual docker login
 }
 
 # ── Launch Template (IMDSv2) ──────────────────────────────────────────────────
@@ -430,8 +398,9 @@ resource "aws_eks_node_group" "workers" {
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = "cloudcare-k8s-workers"
   node_role_arn   = aws_iam_role.eks_node.arn
-  subnet_ids      = aws_subnet.private[*].id    # nodes in PRIVATE subnets (no public IP)
-  instance_types  = ["t3.micro"]               # free tier eligible
+  subnet_ids      = aws_subnet.public[*].id    # public subnets — nodes get public IPs, direct IGW access
+  # ↑ originally aws_subnet.private[*].id but caused NodeCreationFailure (see Issues above)
+  instance_types  = ["t3.small"]    # t3.small (2 GiB RAM) — t3.micro was OOMKilled
 
   scaling_config {
     desired_size = 2    # start with 2 nodes
@@ -462,13 +431,11 @@ resource "aws_eks_node_group" "workers" {
 data "tls_certificate" "eks" {
   url = aws_eks_cluster.main.identity[0].oidc[0].issuer
   # reads the TLS certificate of EKS's OIDC issuer endpoint
-  # needed for the thumbprint below
 }
 
 resource "aws_iam_openid_connect_provider" "eks" {
   client_id_list  = ["sts.amazonaws.com"]    # AWS STS is the audience
   thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
-  # the thumbprint is the certificate fingerprint — proves this OIDC endpoint is legitimate
   url = aws_eks_cluster.main.identity[0].oidc[0].issuer
   # the URL uniquely identifies your cluster's OIDC issuer
   # format: https://oidc.eks.ap-south-1.amazonaws.com/id/UNIQUE_ID
@@ -501,7 +468,6 @@ resource "aws_iam_role" "github_deploy" {
         StringLike = {
           "token.actions.githubusercontent.com:sub" = "repo:your-github-username/cloud-care-k8s:*"
           # only YOUR repo can assume this role — forks cannot
-          # replace "your-github-username" with your actual GitHub username
         }
       }
     }]
@@ -552,24 +518,17 @@ locals {
 resource "aws_ecr_repository" "services" {
   for_each = toset(local.services)
   # for_each creates one resource per item in the set
-  # each.key = "patient-service", "appointment-service", etc.
 
   name                 = "cloudcare-k8s-${each.key}"
-  # creates: cloudcare-k8s-patient-service, cloudcare-k8s-appointment-service, etc.
   image_tag_mutability = "MUTABLE"
-  # MUTABLE = the same tag (e.g. "latest") can point to different images
-  # IMMUTABLE = once pushed, a tag cannot be overwritten (stricter, safer for prod)
 
   image_scanning_configuration {
     scan_on_push = true    # automatically scan every pushed image for CVE vulnerabilities
-    # free — results visible in AWS ECR console under "Image scan findings"
   }
 }
 
 output "ecr_repository_urls" {
   value = { for k, v in aws_ecr_repository.services : k => v.repository_url }
-  # outputs a map: { "patient-service" => "123456.dkr.ecr.ap-south-1.amazonaws.com/..." }
-  # platform stack and CI pipeline read this to know where to push images
 }
 ```
 
@@ -628,10 +587,47 @@ data "terraform_remote_state" "eks" {
     region = "ap-south-1"
   }
 }
+```
 
-# Now use outputs like:
-# data.terraform_remote_state.eks.outputs.vpc_id
-# data.terraform_remote_state.eks.outputs.private_subnet_ids
+### terraform/platform/providers.tf
+
+```hcl
+# Note: Helm provider v3 uses "kubernetes = {}" assignment syntax (not a block)
+terraform {
+  backend "s3" {
+    bucket         = "cloudcare-k8s-tfstate-<your-account-id>"
+    key            = "platform/terraform.tfstate"
+    region         = "ap-south-1"
+    dynamodb_table = "cloudcare-k8s-tfstate-<your-account-id>-lock"
+    encrypt        = true
+  }
+
+  required_providers {
+    aws    = { source = "hashicorp/aws",    version = "~> 6.0" }
+    helm   = { source = "hashicorp/helm",   version = "~> 3.0" }
+    random = { source = "hashicorp/random", version = "~> 3.0" }
+  }
+}
+
+provider "aws" {
+  region = "ap-south-1"
+}
+
+data "aws_eks_cluster_auth" "main" {
+  name = data.terraform_remote_state.eks.outputs.cluster_name
+}
+
+provider "helm" {
+  kubernetes = {    # Helm v3: assignment syntax, NOT a block like "kubernetes { ... }"
+    host                   = data.terraform_remote_state.eks.outputs.cluster_endpoint
+    cluster_ca_certificate = base64decode(data.aws_eks_cluster.main.certificate_authority[0].data)
+    token                  = data.aws_eks_cluster_auth.main.token
+  }
+}
+
+data "aws_eks_cluster" "main" {
+  name = data.terraform_remote_state.eks.outputs.cluster_name
+}
 ```
 
 ### terraform/platform/rds.tf
@@ -642,7 +638,6 @@ resource "aws_db_subnet_group" "main" {
   name       = "cloudcare-k8s-db"
   subnet_ids = data.terraform_remote_state.eks.outputs.db_subnet_ids
   # RDS lives in the dedicated database subnet layer (10.0.20.x, 10.0.21.x)
-  # separate from EKS nodes — matches the 3-layer design from cloud-care v1
 }
 
 # ── Security Group: who can connect to RDS ───────────────────────────────────
@@ -655,14 +650,15 @@ resource "aws_security_group" "rds" {
     to_port     = 5432
     protocol    = "tcp"
     cidr_blocks = ["10.0.0.0/16"]    # only pods inside the VPC can connect
-    # no public internet access to the database
+    # EKS nodes (public subnets 10.0.0.x, 10.0.1.x) are still inside the VPC
+    # this rule allows them to reach RDS in the DB subnets (10.0.20.x, 10.0.21.x)
   }
 }
 
 # ── Random password for master DB user ───────────────────────────────────────
 resource "random_password" "db_master" {
   length  = 24
-  special = false    # no special chars — some DB drivers don't handle them well
+  special = false    # no special chars — connection string parsing can misinterpret them
 }
 
 # ── RDS PostgreSQL Instance ───────────────────────────────────────────────────
@@ -674,7 +670,7 @@ resource "aws_db_instance" "main" {
   allocated_storage = 20               # 20 GB — minimum, free tier includes up to 20 GB
 
   db_name  = "cloudcare"              # the database to create on first launch
-  username = "admin"                  # master user (we create schema-specific users via init.sql)
+  username = "cloudcare_admin"        # master user (we create schema-specific users manually)
   password = random_password.db_master.result
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
@@ -683,7 +679,6 @@ resource "aws_db_instance" "main" {
   publicly_accessible    = false    # private only — no direct internet access
 
   skip_final_snapshot = true        # allow terraform destroy without creating a snapshot
-  # REMOVE this in a real production database — you want a final snapshot for recovery
 }
 ```
 
@@ -695,24 +690,30 @@ resource "random_password" "patient_db"      { length = 24; special = false }
 resource "random_password" "appointment_db"  { length = 24; special = false }
 
 # ── Secrets Manager secrets — one per service ─────────────────────────────────
-# The External Secrets Operator (ESO) will sync these into Kubernetes Secrets (Doc 07)
+# Credentials are stored here and pulled into K8s Secrets at deploy time (Doc 07)
 
 resource "aws_secretsmanager_secret" "patient_db" {
-  name = "cloudcare-k8s/patient-service/db"
-  # path format: project/service/type — easy to manage with IAM path-based policies
+  name                    = "cloudcare-k8s/patient-service/db"
+  recovery_window_in_days = 0
+  # recovery_window_in_days = 0 means force-delete immediately on terraform destroy
+  # without this, deleted secrets sit in a 7-day deletion queue
+  # if you try to re-apply within those 7 days you get:
+  # "InvalidRequestException: already scheduled for deletion"
 }
 
 resource "aws_secretsmanager_secret_version" "patient_db" {
   secret_id = aws_secretsmanager_secret.patient_db.id
   secret_string = jsonencode({
     DATABASE_URL = "postgresql://patient_svc:${random_password.patient_db.result}@${aws_db_instance.main.endpoint}/cloudcare"
-    # patient_svc is the schema-specific postgres user (created by init.sql equivalent)
-    # aws_db_instance.main.endpoint = the RDS hostname (set by AWS after creation)
+    # patient_svc is the schema-specific postgres user
+    # NOTE: this user must be created manually via psql — Terraform doesn't create DB users
+    # see Doc 07 for the DB user initialization procedure
   })
 }
 
 resource "aws_secretsmanager_secret" "appointment_db" {
-  name = "cloudcare-k8s/appointment-service/db"
+  name                    = "cloudcare-k8s/appointment-service/db"
+  recovery_window_in_days = 0    # same reason — immediate deletion on destroy
 }
 
 resource "aws_secretsmanager_secret_version" "appointment_db" {
@@ -743,19 +744,17 @@ resource "aws_iam_role" "alb_controller" {
         StringEquals = {
           "${data.terraform_remote_state.eks.outputs.oidc_provider_url}:sub" =
             "system:serviceaccount:kube-system:aws-load-balancer-controller"
-          # only the alb controller ServiceAccount in kube-system can assume this role
         }
       }
     }]
   })
 }
 
-# AWS provides the policy for the ALB controller — download it:
-# curl -o alb-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
 resource "aws_iam_role_policy" "alb_controller" {
   name   = "cloudcare-k8s-alb-controller"
   role   = aws_iam_role.alb_controller.id
   policy = file("${path.module}/alb-policy.json")    # load from local file
+  # download: curl -o alb-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
 }
 
 # Install the ALB Ingress Controller via Helm (managed by Terraform)
@@ -766,13 +765,17 @@ resource "helm_release" "alb_controller" {
   namespace  = "kube-system"
   version    = "1.7.1"
 
-  set { name = "clusterName"; value = data.terraform_remote_state.eks.outputs.cluster_name }
-  set { name = "serviceAccount.create"; value = "true" }
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.alb_controller.arn
-    # this annotation on the ServiceAccount enables IRSA for the controller pod
-  }
+  # Helm v3: set values as a list of objects (NOT set {} blocks)
+  set = [
+    { name = "clusterName";                                                      value = data.terraform_remote_state.eks.outputs.cluster_name },
+    { name = "serviceAccount.create";                                            value = "true" },
+    { name = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn";       value = aws_iam_role.alb_controller.arn },
+    { name = "vpcId";                                                            value = data.terraform_remote_state.eks.outputs.vpc_id },
+    # vpcId must be set explicitly because EKS nodes use IMDSv2 (http_tokens=required)
+    # the ALB controller tries to discover the VPC ID from IMDS but gets HTTP 401
+    # because IMDSv2 requires a session token that the pod can't obtain without extra setup
+    # explicitly passing vpcId bypasses the IMDS lookup entirely
+  ]
 }
 
 # Install Metrics Server (required for HPA to read CPU metrics)
@@ -789,58 +792,101 @@ resource "helm_release" "metrics_server" {
 ## 5. Apply in correct order
 
 ```bash
+# ── STEP 0: If a previous apply crashed and left a lock ───────────────────────
+# You'll see: "Error acquiring the state lock" with a Lock ID in the message
+# Run this to release it (safe if no other apply is running):
+# cd terraform/eks
+# terraform force-unlock -force <lock-id-from-error-message>
+
 # ── STEP 1: Bootstrap (one-time, already done) ────────────────────────────────
 cd terraform/bootstrap
-terraform init && terraform apply -var="state_bucket_name=cloudcare-k8s-tfstate-$(aws sts get-caller-identity --query Account --output text)"
+# Creates the S3 bucket and DynamoDB lock table — run once and never destroy
+terraform init && terraform apply \
+  -var="state_bucket_name=cloudcare-k8s-tfstate-$(aws sts get-caller-identity --query Account --output text)"
 
 # ── STEP 2: EKS cluster (takes 10–15 minutes) ─────────────────────────────────
 cd terraform/eks
-terraform init    # downloads providers, configures S3 backend
-terraform plan    # preview what will be created
-terraform apply   # creates VPC, subnets, NAT, EKS cluster, node group, OIDC, ECR
-# ⚠️ billing starts here
+
+# Downloads providers (aws, tls) and connects to the S3 backend
+terraform init
+
+# Preview what will be created: VPC, subnets, EKS cluster, node group, OIDC, ECR
+terraform plan
+
+# Create the infrastructure — EKS control plane billing starts here (~$0.10/hr)
+terraform apply
 
 # ── STEP 3: Connect kubectl to the new cluster ────────────────────────────────
+# Writes EKS credentials to ~/.kube/config so kubectl works
 aws eks update-kubeconfig --name cloudcare-k8s --region ap-south-1
-# this writes credentials to ~/.kube/config
 
+# Verify — nodes will be in public subnets (ip-10-0-0-x or ip-10-0-1-x addresses)
 kubectl get nodes
 # NAME                                        STATUS   ROLES    AGE   VERSION
-# ip-10-0-10-45.ap-south-1.compute.internal  Ready    <none>   5m    v1.30.x
-# ip-10-0-11-23.ap-south-1.compute.internal  Ready    <none>   5m    v1.30.x
+# ip-10-0-0-45.ap-south-1.compute.internal   Ready    <none>   5m    v1.30.x
+# ip-10-0-1-23.ap-south-1.compute.internal   Ready    <none>   5m    v1.30.x
 # two nodes in "Ready" = cluster is healthy
 
-# ── STEP 4: Platform resources ────────────────────────────────────────────────
+# ── STEP 4: Platform resources (~8 minutes) ───────────────────────────────────
 cd terraform/platform
-terraform init
-terraform apply   # creates RDS, Secrets Manager, ALB controller, Metrics Server
 
-# ── STEP 5: Push images to ECR ────────────────────────────────────────────────
+# Downloads providers (aws ~>6.0, helm ~>3.0) and connects to S3 backend
+terraform init
+
+# Creates: RDS PostgreSQL, Secrets Manager secrets,
+#          ALB Ingress Controller (Helm), Metrics Server (Helm),
+#          DynamoDB audit_events table, IRSA roles for audit + notification services
+terraform apply
+
+# ── STEP 5: Initialize the database (one-time, after RDS is created) ──────────
+# RDS only creates the database — it does NOT create service-specific users
+# patient_svc and appt_svc must be created manually via a psql pod inside the cluster
+# See Doc 07 for the full DB user initialization procedure
+
+# ── STEP 6: Create K8s Secrets from Secrets Manager ──────────────────────────
+# Pull DATABASE_URL values from Secrets Manager and create K8s Secrets in the prod namespace
+# See Doc 07 for the full secret creation commands
+
+# ── STEP 7: Push images to ECR ────────────────────────────────────────────────
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGION=ap-south-1
+SHA=$(git rev-parse --short HEAD)    # use git SHA as the image tag (immutable, traceable)
 
+# Log in to ECR (token valid for 12 hours)
 aws ecr get-login-password --region $REGION \
   | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 
+# Build, tag with git SHA, and push each service image
 for svc in patient-service appointment-service audit-service notification-service; do
   ECR="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/cloudcare-k8s-$svc"
-  cd services/$svc
-  docker build -t "$ECR:latest" .
-  docker push "$ECR:latest"
-  cd ../..
+  ( cd services/$svc && docker build -t "$ECR:$SHA" . && docker push "$ECR:$SHA" )
 done
 
-# ── STEP 6: Deploy with Helm (prod values) ────────────────────────────────────
+# ── STEP 8: Deploy with Helm (prod values) ────────────────────────────────────
+# Creates namespace prod if it doesn't exist; installs or upgrades each release
 for svc in patient-service appointment-service audit-service notification-service; do
   helm upgrade --install $svc ./helm/$svc \
     -f helm/$svc/values-prod.yaml \
-    --set image.repository="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/cloudcare-k8s-$svc" \
-    --set image.tag=latest \
+    --set image.tag="$SHA" \
     --namespace prod --create-namespace
 done
 
-kubectl get pods -n prod
-# all should show 1/1 or 2/2 Running
+# Watch all pods start — should reach 2/2 Running for each service
+kubectl get pods -n prod -w
+
+# ── STEP 9: Apply Ingress ─────────────────────────────────────────────────────
+# Creates the ALB with path-based routing to all 4 services
+kubectl apply -f k8s/ingress.yaml
+
+# Wait ~2 minutes for ALB provisioning, then get the DNS name
+kubectl get ingress cloudcare-ingress -n prod
+
+ALB=$(kubectl get ingress cloudcare-ingress -n prod \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+# Verify APIs are reachable
+curl "http://$ALB/health"        # → {"status":"ok"}
+curl "http://$ALB/patients"      # → [] (empty array on fresh DB)
 ```
 
 ---
@@ -849,18 +895,21 @@ kubectl get pods -n prod
 
 ```bash
 # Remove Helm releases first
-# (K8s resources like ALBs must be cleaned up before Terraform destroys the VPC)
+# ALBs created by Ingress must be deleted BEFORE Terraform destroys the VPC
+# otherwise the VPC destroy fails because the ALB still exists inside it
 for svc in patient-service appointment-service audit-service notification-service; do
   helm uninstall $svc -n prod 2>/dev/null || true
 done
+helm uninstall aws-load-balancer-controller -n kube-system 2>/dev/null || true
+helm uninstall metrics-server -n kube-system 2>/dev/null || true
 
-# Destroy platform first (it depends on eks)
+# Destroy platform first (it depends on eks outputs)
 cd terraform/platform
-terraform destroy -auto-approve    # takes ~5 minutes
+terraform destroy -auto-approve    # ~5 minutes — destroys RDS, DynamoDB, IAM roles, Secrets
 
 # Then destroy eks
-cd terraform/eks
-terraform destroy -auto-approve    # takes ~10 minutes
+cd ../eks
+terraform destroy -auto-approve    # ~10 minutes — destroys EKS, nodes, VPC, ECR
 
 # DO NOT destroy bootstrap — it holds all your Terraform state
 # bootstrap costs ~$0.01/month — always leave it running
@@ -872,12 +921,15 @@ terraform destroy -auto-approve    # takes ~10 minutes
 
 - [ ] `terraform apply` in bootstrap creates S3 + DynamoDB with no errors
 - [ ] `terraform apply` in eks takes 10–15 min and ends with no errors
-- [ ] `kubectl get nodes` shows 2 nodes in `Ready` status
-- [ ] `terraform apply` in platform creates RDS + Secrets Manager + ALB controller
-- [ ] `kubectl get pods -n prod` shows all 4 services running
+- [ ] `kubectl get nodes` shows 2 nodes in `Ready` status with IPs from `10.0.0.x` or `10.0.1.x` (public subnets)
+- [ ] `terraform apply` in platform creates RDS + Secrets Manager + ALB controller + DynamoDB
+- [ ] `kubectl get pods -n prod` shows all 4 services running after Helm deploy
+- [ ] `kubectl get ingress -n prod` shows an ALB hostname
+- [ ] `curl http://<alb>/health` returns `{"status":"ok"}`
 - [ ] `terraform destroy` in platform + eks cleans up cleanly
+- [ ] You can explain: why are EKS nodes in public subnets in this setup?
 - [ ] You can explain: why does `kubernetes.io/role/elb` tag exist on subnets?
-- [ ] You can explain: why is `source_dest_check = false` needed on the NAT instance?
+- [ ] You can explain: why did the ALB controller need `vpcId` set explicitly?
 - [ ] You can explain: what does the OIDC provider enable?
 
 Next: **[06a — CI/CD Concepts](06a-cicd-concepts.md)** — understand how GitHub Actions

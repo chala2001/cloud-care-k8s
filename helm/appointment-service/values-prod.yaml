@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: "123456789.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-appointment-service"
+  repository: "670794226080.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-appointment-service"
   tag: "latest"                  # CI overrides with git SHA: --set image.tag=abc1234
   pullPolicy: Always
 
@@ -26,6 +26,8 @@ hpa:
   maxReplicas: 6
   targetCPUUtilizationPercentage: 70
 
+databaseSecretName: "appointment-service-db-secret"
+
 externalSecret:
-  enabled: true
+  enabled: false
   remoteSecretName: "cloudcare-k8s/appointment-service/db"

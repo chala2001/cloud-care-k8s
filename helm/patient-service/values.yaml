@@ -51,3 +51,4 @@ externalSecret:
 
 # Database URL — for local dev only; in prod this comes from ExternalSecret
 databaseUrl: ""
+databaseSecretName: ""

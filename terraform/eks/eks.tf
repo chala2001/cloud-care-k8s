@@ -32,8 +32,7 @@ resource "aws_eks_cluster" "main" {
       aws_subnet.private[*].id    # EKS needs both public and private subnet IDs
     )
     endpoint_private_access = true    # kubectl works from inside the VPC (e.g. from a bastion)
-    endpoint_public_access  = false   # the K8s API server is NOT reachable from the internet
-    # security best practice: only access kubectl from inside your VPC or via VPN
+    endpoint_public_access  = true    # nodes and kubectl can reach the API over the internet
     security_group_ids = [aws_security_group.eks_cluster.id]
   }
 
@@ -106,8 +105,8 @@ resource "aws_eks_node_group" "workers" {
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = "cloudcare-k8s-workers"
   node_role_arn   = aws_iam_role.eks_node.arn
-  subnet_ids      = aws_subnet.private[*].id    # nodes in PRIVATE subnets (no public IP)
-  instance_types  = ["t3.micro"]               # free tier eligible
+  subnet_ids      = aws_subnet.public[*].id     # nodes in PUBLIC subnets — direct internet access, no NAT dependency
+  instance_types  = ["t3.small"]               # minimum viable for EKS (micro has too little RAM)
 
   scaling_config {
     desired_size = 2    # start with 2 nodes

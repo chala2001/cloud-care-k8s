@@ -35,7 +35,7 @@ resource "aws_db_instance" "main" {
   allocated_storage = 20               # 20 GB — minimum, free tier includes up to 20 GB
 
   db_name  = "cloudcare"              # the database to create on first launch
-  username = "admin"                  # master user (we create schema-specific users via init.sql)
+  username = "cloudcare_admin"        # master user ("admin" is reserved by PostgreSQL engine)
   password = random_password.db_master.result
 
   db_subnet_group_name   = aws_db_subnet_group.main.name

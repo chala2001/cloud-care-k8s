@@ -144,11 +144,11 @@ hpa:
   maxReplicas: 6        # allow up to 6 under heavy load
   targetCPUUtilizationPercentage: 70
 
-externalSecret:
-  enabled: true                    # pull DATABASE_URL from AWS Secrets Manager
-  remoteSecretName: "cloudcare-k8s/patient-service/db"
-  # this is the path in AWS Secrets Manager where the database URL is stored
-  # ESO syncs it into a K8s Secret → pod reads DATABASE_URL from that Secret
+databaseSecretName: "patient-service-db-secret"
+# in prod, DATABASE_URL is read from this Kubernetes Secret (created from Secrets Manager).
+# This takes priority over databaseUrl. We do NOT pass the URL via --set because
+# Helm mangles connection strings containing "://" and "@" characters.
+# The K8s Secret is created manually before helm deploy — see Doc 07 for the procedure.
 ```
 
 ### templates/_helpers.tpl
@@ -230,7 +230,16 @@ spec:
             - name: {{ $key }}            # e.g. DB_SCHEMA
               value: {{ $val | quote }}   # e.g. "patients" (quote adds the quotes)
             {{- end }}
-            {{- if not .Values.externalSecret.enabled }}
+            {{- if .Values.databaseSecretName }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.databaseSecretName }}
+                  # prod: read DATABASE_URL from this K8s Secret
+                  # the Secret was created from AWS Secrets Manager before helm deploy
+                  # we use secretKeyRef instead of --set because Helm mangles "://" and "@"
+                  key: DATABASE_URL
+            {{- else if not .Values.externalSecret.enabled }}
             - name: DATABASE_URL
               value: {{ .Values.databaseUrl | quote }}
               # dev: DATABASE_URL is a plain string in values-dev.yaml
@@ -239,8 +248,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: patient-service-db-secret
-                  # prod: DATABASE_URL is read from a K8s Secret
-                  # that Secret was created by ExternalSecret (from AWS Secrets Manager)
+                  # ESO path (future): ExternalSecret creates the K8s Secret automatically
                   key: DATABASE_URL
             {{- end }}
           resources:
@@ -477,7 +485,7 @@ for svc in patient-service appointment-service audit-service notification-servic
 done
 ```
 
-### Step 2 — deploy with Helm
+### Step 2 — deploy with Helm (dev — minikube)
 
 ```bash
 cd /home/chalaka/cloud-care-both/cloud-care-k8s
@@ -499,6 +507,33 @@ done
 # ./helm/$svc = path to the chart folder
 # -f values-dev.yaml = use dev values
 # --namespace dev = deploy into the dev namespace
+```
+
+### Deploy with Helm (prod — EKS)
+
+In prod, images are tagged with the git SHA (not `:latest`) and secrets come from K8s Secrets.
+See Doc 07 for the full secret creation procedure before running this.
+
+```bash
+cd /home/chalaka/cloud-care-both/cloud-care-k8s
+
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGION=ap-south-1
+SHA=$(git rev-parse --short HEAD)    # use git SHA for immutable, traceable image tags
+
+# Build and push each image to ECR
+for svc in patient-service appointment-service audit-service notification-service; do
+  ECR="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/cloudcare-k8s-$svc"
+  ( cd services/$svc && docker build -t "$ECR:$SHA" . && docker push "$ECR:$SHA" )
+done
+
+# Deploy with prod values — secrets already exist as K8s Secrets, image tag is the git SHA
+for svc in patient-service appointment-service audit-service notification-service; do
+  helm upgrade --install $svc ./helm/$svc \
+    -f helm/$svc/values-prod.yaml \
+    --set image.tag="$SHA" \
+    --namespace prod --create-namespace
+done
 ```
 
 ### Step 3 — preview before deploying (always do this first)

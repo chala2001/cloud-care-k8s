@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: "123456789.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-notification-service"
+  repository: "670794226080.dkr.ecr.ap-south-1.amazonaws.com/cloudcare-k8s-notification-service"
   tag: "latest"
   pullPolicy: Always
 
@@ -19,6 +19,9 @@ env:
   LOG_LEVEL: "WARNING"
 
 # localDev not set — real SES is used via IRSA (no stored AWS keys)
+
+serviceAccount:
+  roleArn: "arn:aws:iam::670794226080:role/cloudcare-k8s-notification-service"
 
 hpa:
   enabled: true

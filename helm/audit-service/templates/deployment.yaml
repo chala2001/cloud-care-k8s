@@ -15,6 +15,9 @@ spec:
       labels:
         {{- include "audit-service.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if .Values.serviceAccount.roleArn }}
+      serviceAccountName: {{ .Release.Name }}
+      {{- end }}
       containers:
         - name: audit-service
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

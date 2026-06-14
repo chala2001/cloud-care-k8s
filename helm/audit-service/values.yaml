@@ -35,6 +35,9 @@ dynamodbEndpointUrl: ""
 awsAccessKeyId: ""
 awsSecretAccessKey: ""
 
+serviceAccount:
+  roleArn: ""    # set in values-prod.yaml to the IRSA role ARN
+
 hpa:
   enabled: false
   minReplicas: 1

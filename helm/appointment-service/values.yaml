@@ -45,3 +45,4 @@ externalSecret:
   remoteSecretName: ""
 
 databaseUrl: ""
+databaseSecretName: ""

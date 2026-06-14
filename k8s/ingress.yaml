@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cloudcare-ingress
+  namespace: prod
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/subnets: subnet-0fde620180c088cec,subnet-085727ba919384594
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+  ingressClassName: alb
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /patients
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 8001
+          - path: /appointments
+            pathType: Prefix
+            backend:
+              service:
+                name: appointment-service
+                port:
+                  number: 8002
+          - path: /audit
+            pathType: Prefix
+            backend:
+              service:
+                name: audit-service
+                port:
+                  number: 8003
+          - path: /notify
+            pathType: Prefix
+            backend:
+              service:
+                name: notification-service
+                port:
+                  number: 8004
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 8001

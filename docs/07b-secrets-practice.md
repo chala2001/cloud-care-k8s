@@ -1,59 +1,70 @@
 # 07b — Secrets Practice: Every File, Every Line
 
-> **Read 07a first.** This doc writes all Terraform (IRSA roles) and Kubernetes
-> YAML (ExternalSecret, ClusterSecretStore, ServiceAccount) with every line explained.
+> **Read 07a first.** This doc covers: IRSA roles in Terraform (irsa.tf), manual K8s
+> Secrets from Secrets Manager, the Helm `databaseSecretName` pattern, the DB user
+> initialization procedure, and how IRSA gives audit/notification pods AWS credentials.
 
 ---
 
-## 1. Terraform: IRSA roles for each service
+## Issues encountered during this phase (and how we solved them)
 
-These go in the **platform stack** (`terraform/platform/irsa.tf`).
+| Issue | Error | Fix |
+|-------|-------|-----|
+| **Secrets deletion queue** | `InvalidRequestException: You can't create this secret because a secret with this name is already scheduled for deletion` | Added `recovery_window_in_days = 0` to secrets.tf. One-time fix for existing queue: `aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery` |
+| **DATABASE_URL KeyError / empty env** | `KeyError: 'DATABASE_URL'` at pod startup | Using `--set` with Helm mangles URLs containing `://` and `@`. Fixed by creating a K8s Secret and reading it via `secretKeyRef` instead of passing the URL as a Helm value |
+| **DB users not in PostgreSQL** | `password authentication failed for user "patient_svc"` | Terraform creates Secrets Manager entries but never runs `CREATE USER` in PostgreSQL. Fixed by running a one-time psql pod inside the cluster (see Section 2 below) |
+| **Node capacity full** | `Too many pods — cannot schedule` | t3.small holds ~10 pods. Scale failing services to 0 replicas before adding init pods; scale back after |
+| **Audit events empty after POST** | `GET /audit` returns `[]` even after creating a patient | audit-service posts events as a background task (fires after the response). Wait 2 seconds before checking. Not a bug — fire-and-forget by design |
+
+---
+
+## 1. Terraform: IRSA roles and DynamoDB table (`terraform/platform/irsa.tf`)
+
+This file creates:
+- The DynamoDB table for audit events
+- An IRSA role for audit-service (DynamoDB access)
+- An IRSA role for notification-service (SES access)
+- Outputs so Helm charts can reference the role ARNs
 
 ```hcl
-# ── Read OIDC provider info from the eks stack ────────────────────────────────
-# (already available via remote_state.tf)
-# data.terraform_remote_state.eks.outputs.oidc_provider_arn
-# data.terraform_remote_state.eks.outputs.oidc_provider_url
+# ── DynamoDB table for audit events ──────────────────────────────────────────
+# audit-service writes every patient/appointment mutation here (fire-and-forget)
+resource "aws_dynamodb_table" "audit_events" {
+  name         = "audit_events"      # matches DYNAMODB_TABLE env var in audit-service
+  billing_mode = "PAY_PER_REQUEST"   # no capacity planning — pay per read/write
+  hash_key     = "event_id"          # partition key — each event has a UUID
 
-locals {
-  oidc_arn = data.terraform_remote_state.eks.outputs.oidc_provider_arn
-  oidc_url = data.terraform_remote_state.eks.outputs.oidc_provider_url
-  # shorthand so the trust policies below are readable
+  attribute {
+    name = "event_id"
+    type = "S"    # S = String (UUID stored as string)
+  }
 }
 
-# ── Helper: a function that builds the trust policy for any ServiceAccount ────
-# We use it 3 times (audit, notification, ESO) — avoids copy-paste
-locals {
-  irsa_trust_policy = { for sa, ns in {
-    "audit-service"        = "prod"
-    "notification-service" = "prod"
-    "eso-service-account"  = "external-secrets"    # ESO runs in its own namespace
-  } : sa => jsonencode({
+# ── IRSA role: audit-service → DynamoDB ──────────────────────────────────────
+# IRSA (IAM Roles for Service Accounts): pod-level AWS identity without stored keys
+# The EKS OIDC provider exchanges a Kubernetes ServiceAccount JWT for temporary AWS creds
+resource "aws_iam_role" "audit_service" {
+  name = "cloudcare-k8s-audit-service"
+
+  assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Principal = { Federated = local.oidc_arn }
-      Action = "sts:AssumeRoleWithWebIdentity"
+      Effect    = "Allow"
+      Principal = { Federated = data.terraform_remote_state.eks.outputs.oidc_provider_arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = {
-          "${local.oidc_url}:sub" = "system:serviceaccount:${ns}:${sa}"
-          # "system:serviceaccount:prod:audit-service"
-          # only the exact ServiceAccount in the exact namespace can assume this role
-          "${local.oidc_url}:aud" = "sts.amazonaws.com"
+          # only the audit-service ServiceAccount in the prod namespace can assume this role
+          # format: <oidc-url>:sub = system:serviceaccount:<namespace>:<serviceaccount-name>
+          "${data.terraform_remote_state.eks.outputs.oidc_provider_url}:sub" = "system:serviceaccount:prod:audit-service"
         }
       }
     }]
-  })}
-}
-
-# ── IAM Role: audit-service ───────────────────────────────────────────────────
-resource "aws_iam_role" "audit_service" {
-  name               = "cloudcare-k8s-audit-service"
-  assume_role_policy = local.irsa_trust_policy["audit-service"]
+  })
 }
 
 resource "aws_iam_role_policy" "audit_service" {
-  name = "cloudcare-k8s-audit-service-policy"
+  name = "cloudcare-k8s-audit-service"
   role = aws_iam_role.audit_service.id
 
   policy = jsonencode({
@@ -61,175 +72,232 @@ resource "aws_iam_role_policy" "audit_service" {
     Statement = [{
       Effect = "Allow"
       Action = [
-        "dynamodb:PutItem",       # write audit events
-        "dynamodb:GetItem",       # read back for debugging
-        "dynamodb:CreateTable",   # audit-service creates the table if missing
-        "dynamodb:DescribeTable", # check table exists before writing
+        "dynamodb:PutItem",     # write new audit events
+        "dynamodb:GetItem",     # read single event by ID
+        "dynamodb:Scan",        # list events (used by GET /audit)
+        "dynamodb:Query",       # query by index (future use)
+        "dynamodb:UpdateItem",  # update event (not currently used)
+        "dynamodb:DeleteItem"   # delete event (not currently used)
       ]
-      Resource = "arn:aws:dynamodb:ap-south-1:670794226080:table/cloudcare-events"
-      # scope to EXACTLY this table — not all DynamoDB tables in the account
+      Resource = aws_dynamodb_table.audit_events.arn    # scoped to THIS table only
     }]
   })
 }
 
-# ── IAM Role: notification-service ───────────────────────────────────────────
+# ── IRSA role: notification-service → SES ────────────────────────────────────
+# notification-service calls SES to send transactional email
 resource "aws_iam_role" "notification_service" {
-  name               = "cloudcare-k8s-notification-service"
-  assume_role_policy = local.irsa_trust_policy["notification-service"]
+  name = "cloudcare-k8s-notification-service"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = data.terraform_remote_state.eks.outputs.oidc_provider_arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          # only notification-service in prod namespace can assume this role
+          "${data.terraform_remote_state.eks.outputs.oidc_provider_url}:sub" = "system:serviceaccount:prod:notification-service"
+        }
+      }
+    }]
+  })
 }
 
 resource "aws_iam_role_policy" "notification_service" {
-  name = "cloudcare-k8s-notification-service-policy"
+  name = "cloudcare-k8s-notification-service"
   role = aws_iam_role.notification_service.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect   = "Allow"
-      Action   = ["ses:SendEmail", "ses:SendRawEmail"]
-      Resource = "*"
-      # SES doesn't support resource-level ARN scoping for SendEmail
-      # restrict instead by verified email identities (configured in SES console)
+      Action   = [
+        "ses:SendEmail",       # send plain HTML/text emails
+        "ses:SendRawEmail"     # send emails with attachments (future-proof)
+      ]
+      Resource = "*"    # SES doesn't support resource-level permissions on send actions
+      # NOTE: SES requires email address verification before you can send in sandbox mode
+      # verify sender via: aws ses verify-email-identity --email-address noreply@yourdomain.com
     }]
   })
 }
 
-# ── IAM Role: ESO (External Secrets Operator) ─────────────────────────────────
-# ESO needs to read from Secrets Manager on behalf of patient and appointment services
-resource "aws_iam_role" "eso" {
-  name               = "cloudcare-k8s-eso"
-  assume_role_policy = local.irsa_trust_policy["eso-service-account"]
-}
-
-resource "aws_iam_role_policy" "eso" {
-  name = "cloudcare-k8s-eso-policy"
-  role = aws_iam_role.eso.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "secretsmanager:GetSecretValue",    # read the actual secret value
-        "secretsmanager:DescribeSecret",    # check secret exists before reading
-      ]
-      Resource = [
-        "arn:aws:secretsmanager:ap-south-1:670794226080:secret:cloudcare-k8s/patient-service/*",
-        "arn:aws:secretsmanager:ap-south-1:670794226080:secret:cloudcare-k8s/appointment-service/*",
-        # scope to ONLY the secrets for these two services — not all secrets in the account
-      ]
-    }]
-  })
-}
-
-# ── Outputs: ARNs so Helm charts can reference them ───────────────────────────
 output "audit_service_role_arn" {
   value = aws_iam_role.audit_service.arn
-  # used in: helm/audit-service/values-prod.yaml → serviceAccount.annotations
+  # used in helm/audit-service/values-prod.yaml → serviceAccount.roleArn
 }
 
 output "notification_service_role_arn" {
   value = aws_iam_role.notification_service.arn
-}
-
-output "eso_role_arn" {
-  value = aws_iam_role.eso.arn
-  # used in: platform/eso.tf → Helm release set value
+  # used in helm/notification-service/values-prod.yaml → serviceAccount.roleArn
 }
 ```
 
----
-
-## 2. Terraform: install ESO via Helm
-
-In `terraform/platform/eso.tf`:
-
-```hcl
-# Install External Secrets Operator into the cluster
-resource "helm_release" "eso" {
-  name             = "external-secrets"
-  repository       = "https://charts.external-secrets.io"
-  chart            = "external-secrets"
-  namespace        = "external-secrets"    # ESO lives in its own namespace
-  create_namespace = true                  # create it if it doesn't exist
-  version          = "0.9.11"             # pin the version for reproducibility
-
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.eso.arn
-    # annotate the ESO ServiceAccount with the IRSA role ARN
-    # the backslash escapes the dot so Helm treats it as a key with a dot,
-    # not as nested YAML (eks → amazonaws → com/role-arn)
-  }
-  # After install, ESO watches all ExternalSecret resources in the cluster
-  # and syncs them into Kubernetes Secrets automatically
-}
-```
-
----
-
-## 3. Kubernetes: ClusterSecretStore
-
-This YAML tells ESO "use AWS Secrets Manager in ap-south-1".
-One per cluster — apply it once.
-
-`k8s/base/cluster-secret-store.yaml`:
-
-```yaml
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: aws-secrets-manager    # referenced by all ExternalSecrets below
-spec:
-  provider:
-    aws:
-      service: SecretsManager    # use AWS Secrets Manager (not Parameter Store)
-      region: ap-south-1
-      auth:
-        jwt:
-          serviceAccountRef:
-            name: external-secrets    # ESO's own ServiceAccount (has IRSA role)
-            namespace: external-secrets
-            # ESO uses its IRSA credentials to authenticate with Secrets Manager
-            # your microservice pods never touch Secrets Manager directly
-```
-
-Apply after ESO is installed:
+**Apply it:**
 ```bash
-kubectl apply -f k8s/base/cluster-secret-store.yaml
+# From the platform stack directory
+cd terraform/platform
 
-# verify it connected successfully:
-kubectl get clustersecretstore aws-secrets-manager
-# STATUS should be: Valid
+# Creates the DynamoDB table and two IRSA roles
+terraform apply
+
+# Confirm the role ARNs are in the output
+terraform output audit_service_role_arn
+terraform output notification_service_role_arn
 ```
 
 ---
 
-## 4. Helm chart updates: ServiceAccount + ExternalSecret
+## 2. Initialize the database (one-time after RDS creation)
 
-For IRSA to work, the Deployment must reference a ServiceAccount that has
-the IRSA annotation. We add this to the Helm charts.
+Terraform creates the RDS instance and stores credentials in Secrets Manager,
+but it **never runs `CREATE USER` in PostgreSQL**. The service-specific users
+(`patient_svc`, `appt_svc`) must be created manually. RDS is not publicly accessible,
+so this is done via a temporary psql pod inside the cluster.
 
-### 4a. Add ServiceAccount template
+### Why this is needed
+
+Secrets Manager stores a `DATABASE_URL` like:
+```
+postgresql://patient_svc:PASSWORD@RDS_HOST:5432/cloudcare
+```
+
+But that user doesn't exist in PostgreSQL until you create it. Services will
+`CrashLoopBackOff` with `password authentication failed for user "patient_svc"` until this runs.
+
+### The init procedure
+
+```bash
+# Get the master password from Terraform state (set by random_password.db_master)
+MASTER_PASS=$(cd terraform/platform && terraform output -raw db_master_password 2>/dev/null || \
+  aws secretsmanager get-secret-value \
+    --secret-id cloudcare-k8s/master/db --query SecretString --output text \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+
+# Get service passwords from Secrets Manager
+PATIENT_PASS=$(aws secretsmanager get-secret-value \
+  --secret-id cloudcare-k8s/patient-service/db --query SecretString --output text \
+  | python3 -c "import sys,json; from urllib.parse import urlparse; print(urlparse(json.load(sys.stdin)['DATABASE_URL']).password)")
+
+APPT_PASS=$(aws secretsmanager get-secret-value \
+  --secret-id cloudcare-k8s/appointment-service/db --query SecretString --output text \
+  | python3 -c "import sys,json; from urllib.parse import urlparse; print(urlparse(json.load(sys.stdin)['DATABASE_URL']).password)")
+
+# Get the RDS hostname (without port)
+RDS_HOST=$(aws rds describe-db-instances --db-instance-identifier cloudcare-k8s-db \
+  --query 'DBInstances[0].Endpoint.Address' --output text)
+
+# If nodes are tight on capacity (t3.small fits ~10 pods), scale down app pods first
+# to make room for the init pod
+kubectl scale deployment patient-service appointment-service -n prod --replicas=0 2>/dev/null; true
+
+# Run a one-shot postgres pod inside the cluster — it can reach the private RDS endpoint
+kubectl run psql-init -n prod --restart=Never --image=postgres:16 -- sleep 300
+
+# Wait for the pod to be ready
+kubectl wait pod/psql-init -n prod --for=condition=Ready --timeout=60s
+
+# Create service users and grant schema permissions
+# sslmode=require is mandatory for RDS
+kubectl exec -n prod psql-init -- psql \
+  "postgresql://cloudcare_admin:${MASTER_PASS}@${RDS_HOST}/cloudcare?sslmode=require" \
+  -c "CREATE USER patient_svc WITH PASSWORD '${PATIENT_PASS}';" \
+  -c "CREATE SCHEMA IF NOT EXISTS patients;" \
+  -c "GRANT CONNECT ON DATABASE cloudcare TO patient_svc;" \
+  -c "GRANT USAGE, CREATE ON SCHEMA patients TO patient_svc;" \
+  -c "ALTER DEFAULT PRIVILEGES IN SCHEMA patients GRANT ALL ON TABLES TO patient_svc;" \
+  -c "CREATE USER appt_svc WITH PASSWORD '${APPT_PASS}';" \
+  -c "CREATE SCHEMA IF NOT EXISTS appointments;" \
+  -c "GRANT CONNECT ON DATABASE cloudcare TO appt_svc;" \
+  -c "GRANT USAGE, CREATE ON SCHEMA appointments TO appt_svc;" \
+  -c "ALTER DEFAULT PRIVILEGES IN SCHEMA appointments GRANT ALL ON TABLES TO appt_svc;"
+
+# Clean up the init pod
+kubectl delete pod psql-init -n prod
+
+# Scale app services back up
+kubectl scale deployment patient-service appointment-service -n prod --replicas=2
+```
+
+> **Repeat this whenever RDS is recreated.** `terraform destroy` + `terraform apply`
+> creates a new RDS instance with no users. The procedure above must run again.
+
+---
+
+## 3. Create K8s Secrets from Secrets Manager
+
+Services read `DATABASE_URL` from a Kubernetes Secret. We don't pass it via
+`--set` in Helm because Helm mangles URLs containing `://` and `@`.
+
+```bash
+# Pull the full DATABASE_URL for each service from Secrets Manager
+PATIENT_DB_URL=$(aws secretsmanager get-secret-value \
+  --secret-id cloudcare-k8s/patient-service/db --query SecretString --output text \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['DATABASE_URL'])")
+
+APPT_DB_URL=$(aws secretsmanager get-secret-value \
+  --secret-id cloudcare-k8s/appointment-service/db --query SecretString --output text \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['DATABASE_URL'])")
+
+# Create the prod namespace if it doesn't exist
+kubectl create namespace prod 2>/dev/null || true
+
+# Create K8s Secrets in the prod namespace
+# --dry-run=client -o yaml | kubectl apply -f - is idempotent (safe to re-run)
+kubectl create secret generic patient-service-db-secret \
+  --from-literal=DATABASE_URL="$PATIENT_DB_URL" \
+  -n prod --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret generic appointment-service-db-secret \
+  --from-literal=DATABASE_URL="$APPT_DB_URL" \
+  -n prod --dry-run=client -o yaml | kubectl apply -f -
+
+# Verify the secrets exist (values are base64-encoded — this is normal, not plain text)
+kubectl get secret patient-service-db-secret -n prod
+kubectl get secret appointment-service-db-secret -n prod
+```
+
+> **Why `--dry-run=client -o yaml | kubectl apply` instead of `kubectl create`?**
+> `kubectl create secret` fails with "already exists" if you run it twice.
+> The dry-run pattern generates a manifest and applies it — idempotent like Terraform.
+> These secrets survive `helm upgrade` because Helm didn't create them.
+
+---
+
+## 4. Helm chart: ServiceAccount template for IRSA
+
+IRSA works because of an annotation on the Kubernetes ServiceAccount. The EKS webhook
+reads the annotation, injects `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN` env vars
+into the pod, and boto3/AWS SDK picks them up automatically.
 
 Create `helm/audit-service/templates/serviceaccount.yaml`:
 
 ```yaml
+{{- if .Values.serviceAccount.roleArn }}
+# Only create this ServiceAccount when a role ARN is provided (i.e. in prod)
+# In dev, the pod uses the default ServiceAccount (no AWS credentials injected)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "audit-service.fullname" . }}
+  name: {{ .Release.Name }}          # "audit-service" — must match the Deployment below
   namespace: {{ .Release.Namespace }}
   annotations:
-    {{- if .Values.serviceAccount.roleArn }}
     eks.amazonaws.com/role-arn: {{ .Values.serviceAccount.roleArn }}
-    # this annotation is what IRSA reads
-    # EKS webhook sees this → injects AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN into pod
-    # boto3 picks up those env vars automatically → no credential code needed
-    {{- end }}
+    # this annotation is the IRSA trigger
+    # the EKS pod identity webhook reads it and injects:
+    #   AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token
+    #   AWS_ROLE_ARN=arn:aws:iam::670794226080:role/cloudcare-k8s-audit-service
+    # boto3 calls sts:AssumeRoleWithWebIdentity automatically using those env vars
+{{- end }}
 ```
 
-### 4b. Update deployment.yaml to reference the ServiceAccount
+Do the same for `helm/notification-service/templates/serviceaccount.yaml`.
+
+---
+
+## 5. Helm chart: Deployment references the ServiceAccount
 
 In `helm/audit-service/templates/deployment.yaml`, add `serviceAccountName` to the pod spec:
 
@@ -237,163 +305,190 @@ In `helm/audit-service/templates/deployment.yaml`, add `serviceAccountName` to t
 spec:
   template:
     spec:
-      serviceAccountName: {{ include "audit-service.fullname" . }}
-      # tells Kubernetes to run this pod AS the ServiceAccount above
+      {{- if .Values.serviceAccount.roleArn }}
+      serviceAccountName: {{ .Release.Name }}
+      # runs this pod AS the ServiceAccount with the IRSA annotation
       # without this line, the pod uses the "default" ServiceAccount
       # which has no IRSA annotation → no AWS credentials injected
+      {{- end }}
       containers:
-        ...
+        - name: audit-service
+          ...
 ```
 
-### 4c. Update values files
+Do the same for `helm/notification-service/templates/deployment.yaml`.
 
-In `helm/audit-service/values.yaml`:
+---
+
+## 6. Helm values: serviceAccount.roleArn
+
+In `helm/audit-service/values.yaml` (the base defaults):
 ```yaml
 serviceAccount:
-  roleArn: ""    # empty by default (dev uses local DynamoDB, no IRSA needed)
+  roleArn: ""    # empty by default — dev uses local DynamoDB, no IRSA needed
 ```
 
-In `helm/audit-service/values-prod.yaml`:
+In `helm/audit-service/values-prod.yaml` (prod overrides):
 ```yaml
 serviceAccount:
   roleArn: "arn:aws:iam::670794226080:role/cloudcare-k8s-audit-service"
-  # the ARN from irsa.tf output — paste the actual ARN after terraform apply
+  # paste the ARN from terraform output audit_service_role_arn
 ```
 
-Do the same for **notification-service** (`cloudcare-k8s-notification-service` role ARN).
-
-**patient-service and appointment-service** don't need IRSA — ESO handles their secrets.
-They just need the ExternalSecret (see below).
+In `helm/notification-service/values-prod.yaml`:
+```yaml
+serviceAccount:
+  roleArn: "arn:aws:iam::670794226080:role/cloudcare-k8s-notification-service"
+  # paste the ARN from terraform output notification_service_role_arn
+```
 
 ---
 
-## 5. Helm chart: ExternalSecret template
+## 7. Helm chart: `databaseSecretName` pattern for DB credentials
 
-The `externalsecret.yaml` file is already in the Helm charts. Here is every line explained:
+For patient-service and appointment-service, `DATABASE_URL` comes from a K8s Secret
+(not from a Helm value). We use a `databaseSecretName` Helm value to point at it.
 
-`helm/patient-service/templates/externalsecret.yaml`:
+This pattern has three-way priority in `deployment.yaml`:
+1. If `databaseSecretName` is set → read `DATABASE_URL` from that K8s Secret
+2. Else if `externalSecret.enabled=true` → read from the ESO-managed secret (future)
+3. Else → use the `databaseUrl` string value (dev / local)
+
+`helm/patient-service/templates/deployment.yaml` — the DATABASE_URL section:
 
 ```yaml
-{{- if .Values.externalSecret.enabled }}
-# only render this file when externalSecret.enabled=true
-# in dev: disabled (we use a plain K8s Secret or env vars)
-# in prod: enabled (ESO pulls from Secrets Manager)
+env:
+  {{- range $key, $val := .Values.env }}
+  - name: {{ $key }}
+    value: {{ $val | quote }}
+  {{- end }}
 
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: {{ include "patient-service.fullname" . }}-db
-  namespace: {{ .Release.Namespace }}
-spec:
-  refreshInterval: 1h    # ESO re-reads from Secrets Manager every hour
-  # if you rotate the DB password in Secrets Manager, pods get the new password within 1 hour
-  # without manual intervention
-
-  secretStoreRef:
-    name: aws-secrets-manager    # use the ClusterSecretStore we created above
-    kind: ClusterSecretStore
-
-  target:
-    name: {{ include "patient-service.fullname" . }}-db-secret
-    # name of the Kubernetes Secret that ESO will create
-    # this is the Secret your Deployment references in envFrom or env.valueFrom
-
-  data:
-    - secretKey: DATABASE_URL           # the key inside the created K8s Secret
-      remoteRef:
-        key: cloudcare-k8s/patient-service/db    # the path in Secrets Manager
-        # this is the secret name from secrets.tf: aws_secretsmanager_secret.patient_db
-        property: DATABASE_URL          # the field inside the JSON value
-        # Secrets Manager stores: { "DATABASE_URL": "postgresql://..." }
-        # property picks out the DATABASE_URL field from that JSON
-{{- end }}
+  {{- if .Values.databaseSecretName }}
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: {{ .Values.databaseSecretName }}    # e.g. "patient-service-db-secret"
+        key: DATABASE_URL                          # the key inside that K8s Secret
+  # this is the prod path: the K8s Secret was created from Secrets Manager credentials
+  {{- else if not .Values.externalSecret.enabled }}
+  - name: DATABASE_URL
+    value: {{ .Values.databaseUrl | quote }}
+  # this is the dev path: plain connection string from values-dev.yaml
+  {{- else }}
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: patient-service-db-secret
+        key: DATABASE_URL
+  # this is the ESO path (future): ExternalSecret creates the K8s Secret automatically
+  {{- end }}
 ```
 
-In `values.yaml`:
+`helm/patient-service/values.yaml` — add the new field:
 ```yaml
-externalSecret:
-  enabled: false    # default off
+databaseSecretName: ""    # empty by default — set in values-prod.yaml to use a K8s Secret
 ```
 
-In `values-prod.yaml`:
+`helm/patient-service/values-prod.yaml`:
 ```yaml
-externalSecret:
-  enabled: true     # turns on the ExternalSecret in prod
+databaseSecretName: "patient-service-db-secret"
+# the K8s Secret created in Section 3 above
+# this takes priority over databaseUrl and externalSecret.enabled
 ```
 
-Do the same for **appointment-service** (pointing to `cloudcare-k8s/appointment-service/db`).
+Do the same for appointment-service (`"appointment-service-db-secret"`).
 
 ---
 
-## 6. Update Deployment to read from the K8s Secret
-
-In `helm/patient-service/templates/deployment.yaml`, the DATABASE_URL env var
-should read from the Secret that ESO created:
-
-```yaml
-containers:
-  - name: patient-service
-    env:
-      {{- if .Values.externalSecret.enabled }}
-      - name: DATABASE_URL
-        valueFrom:
-          secretKeyRef:
-            name: {{ include "patient-service.fullname" . }}-db-secret
-            # this is the K8s Secret that ESO created
-            key: DATABASE_URL
-      {{- else }}
-      - name: DATABASE_URL
-        value: {{ .Values.databaseUrl | quote }}
-        # dev: use plain value from values-dev.yaml (points to local postgres)
-      {{- end }}
-```
-
-In prod: `DATABASE_URL` comes from the ESO-synced Secret.
-In dev: `DATABASE_URL` comes from `values-dev.yaml` directly (no ESO, no Secrets Manager).
-
----
-
-## 7. Apply order (when EKS is running)
+## 8. Apply order (when EKS is running)
 
 ```bash
-# 1. Deploy ESO via terraform (platform stack)
+# Step 1: Apply platform Terraform (creates DynamoDB table and IRSA roles)
 cd terraform/platform && terraform apply
 
-# 2. Apply the ClusterSecretStore
-kubectl apply -f k8s/base/cluster-secret-store.yaml
+# Step 2: Initialize the database (one-time — see Section 2)
+# Run the psql-init pod procedure to CREATE USER patient_svc and appt_svc in PostgreSQL
 
-# 3. Verify ESO connected to Secrets Manager
-kubectl get clustersecretstore aws-secrets-manager
-# should show: READY=True
+# Step 3: Create K8s Secrets from Secrets Manager values (see Section 3)
+kubectl create secret generic patient-service-db-secret ...
+kubectl create secret generic appointment-service-db-secret ...
 
-# 4. Deploy services with prod values — ExternalSecrets are created automatically
-helm upgrade --install patient-service ./helm/patient-service \
-  -f helm/patient-service/values-prod.yaml \
-  --namespace prod --create-namespace
+# Step 4: Deploy all services with prod values (includes IRSA ServiceAccounts)
+SHA=$(git rev-parse --short HEAD)
+for svc in patient-service appointment-service audit-service notification-service; do
+  helm upgrade --install $svc ./helm/$svc \
+    -f helm/$svc/values-prod.yaml \
+    --set image.tag="$SHA" \
+    --namespace prod --create-namespace
+done
 
-# 5. Watch ESO sync the secret
-kubectl get externalsecret -n prod
-# NAME                          STORE                 REFRESH INTERVAL   STATUS
-# patient-service-db            aws-secrets-manager   1h                 SecretSynced
+# Step 5: Verify IRSA is working for audit-service
+# Check that AWS_WEB_IDENTITY_TOKEN_FILE is injected into the audit-service pod
+kubectl exec -n prod deployment/audit-service -- env | grep AWS_ROLE_ARN
+# Should print: AWS_ROLE_ARN=arn:aws:iam::670794226080:role/cloudcare-k8s-audit-service
 
-# 6. Verify the K8s Secret was created
-kubectl get secret patient-service-db-secret -n prod
-kubectl describe secret patient-service-db-secret -n prod
-# shows the keys (not the values — K8s doesn't show secret values in describe)
+# Step 6: Verify the audit trail works end to end
+ALB=$(kubectl get ingress cloudcare-ingress -n prod \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+# Create a patient — audit-service fires a background event after this
+curl -X POST "http://$ALB/patients" \
+  -H "Content-Type: application/json" \
+  -d '{"full_name":"Jane Doe","date_of_birth":"1990-01-01","phone":"+94771234567"}'
+
+# Wait 2 seconds — audit POST is a background task, fires after the HTTP response
+sleep 2
+
+# Check audit log — should show the patient creation event from DynamoDB
+curl "http://$ALB/audit"
 ```
+
+---
+
+## 9. SES email verification (notification-service)
+
+Before notification-service can send real emails, the sender address must be verified in SES.
+AWS SES sandbox mode prevents sending to unverified addresses.
+
+```bash
+# Verify the sender address (you'll receive a confirmation email)
+aws ses verify-email-identity \
+  --email-address noreply@cloudcare.com \
+  --region ap-south-1
+
+# Check verification status
+aws ses get-identity-verification-attributes \
+  --identities noreply@cloudcare.com \
+  --region ap-south-1
+# Wait for VerificationStatus: "Success"
+
+# Test a notification (replace with your own verified email in sandbox mode)
+ALB=$(kubectl get ingress cloudcare-ingress -n prod \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+curl -X POST "http://$ALB/notify" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"yourverifiedemail@example.com","subject":"Test","body":"Hello from CloudCare"}'
+```
+
+> **Sandbox limitation:** In SES sandbox mode, both sender AND recipient must be verified.
+> Request production access (SES console → "Request Production Access") to send to any address.
 
 ---
 
 ## ✅ Checkpoint — done when:
 
-- [ ] `irsa.tf` has roles for audit-service, notification-service, and ESO
-- [ ] `eso.tf` installs ESO with the IRSA role annotation
-- [ ] `cluster-secret-store.yaml` created in `k8s/base/`
-- [ ] audit-service and notification-service Helm charts have `serviceaccount.yaml`
-- [ ] patient-service and appointment-service have `externalsecret.yaml` enabled in prod values
-- [ ] You can explain: why does ESO need IRSA but patient-service does not?
-- [ ] You can explain: what happens to DATABASE_URL if you rotate the password in Secrets Manager?
-- [ ] You can explain: why is `system:serviceaccount:prod:audit-service` in the trust policy?
+- [ ] `terraform/platform/irsa.tf` has DynamoDB table + roles for audit-service and notification-service
+- [ ] DB users `patient_svc` and `appt_svc` exist in PostgreSQL (psql init ran successfully)
+- [ ] `kubectl get secret patient-service-db-secret -n prod` shows the secret
+- [ ] `kubectl get secret appointment-service-db-secret -n prod` shows the secret
+- [ ] `kubectl exec -n prod deployment/audit-service -- env | grep AWS_ROLE_ARN` shows the ARN
+- [ ] `kubectl exec -n prod deployment/patient-service -- env | grep DATABASE_URL` is empty (reads from Secret, not env)
+- [ ] `POST /patients` + `GET /audit` shows an audit event in DynamoDB
+- [ ] You can explain: why does `databaseSecretName` take priority over `databaseUrl`?
+- [ ] You can explain: why do we NOT pass DATABASE_URL via `--set` in Helm?
+- [ ] You can explain: what does the EKS pod identity webhook do when it sees the IRSA annotation?
+- [ ] You can explain: why must the DB users be created manually after every RDS recreation?
 
 Next: **[08a — HPA Concepts](08a-hpa-concepts.md)** — understand how Kubernetes
 automatically scales pods up and down based on CPU load.
