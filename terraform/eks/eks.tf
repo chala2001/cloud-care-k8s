@@ -1,4 +1,4 @@
-# ── IAM Role for the EKS Control Plane ───────────────────────────────────────
+# ── IAM Role for the EKS Control Plane ──────────────────────────────────────
 # EKS needs permission to manage AWS resources on your behalf (ENIs, security groups)
 resource "aws_iam_role" "eks_cluster" {
   name = "cloudcare-k8s-cluster-role"
