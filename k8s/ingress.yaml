@@ -6,11 +6,12 @@ metadata:
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/subnets: subnet-0fde620180c088cec,subnet-085727ba919384594
+    # subnets NOT hardcoded here — ALB controller auto-discovers them via
+    # the kubernetes.io/role/elb=1 tag we set on public subnets in vpc.tf
     alb.ingress.kubernetes.io/healthcheck-path: /health
     alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
-  ingressClassName: alb
 spec:
+  ingressClassName: alb    # must be in spec, NOT in metadata
   rules:
     - http:
         paths:

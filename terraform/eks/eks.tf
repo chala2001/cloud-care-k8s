@@ -109,8 +109,8 @@ resource "aws_eks_node_group" "workers" {
   instance_types  = ["t3.small"]               # minimum viable for EKS (micro has too little RAM)
 
   scaling_config {
-    desired_size = 2    # start with 2 nodes
-    min_size     = 2    # never go below 2 (HA: tolerate one node failure)
+    desired_size = 3    # start with 3 nodes
+    min_size     = 3    # never go below 3 (HA: tolerate one node failure)
     max_size     = 4    # allow up to 4 during heavy load
   }
 
