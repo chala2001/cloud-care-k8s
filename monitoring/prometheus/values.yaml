@@ -1,0 +1,61 @@
+# monitoring/prometheus/values.yaml
+# Passed to: helm install kube-prometheus-stack
+# This single Helm chart installs Prometheus + Grafana + AlertManager together
+
+# ── Prometheus ────────────────────────────────────────────────────────────────
+prometheus:
+  prometheusSpec:
+    scrapeInterval: "15s"   # visit every /metrics URL every 15 seconds
+
+    # Tell Prometheus exactly which services to scrape
+    # DNS format inside cluster: <service-name>.<namespace>.svc.cluster.local
+    additionalScrapeConfigs:
+      - job_name: "cloudcare-patient-service"
+        static_configs:
+          - targets: ["patient-service.prod.svc.cluster.local:8001"]
+        metrics_path: /metrics
+
+      - job_name: "cloudcare-appointment-service"
+        static_configs:
+          - targets: ["appointment-service.prod.svc.cluster.local:8002"]
+        metrics_path: /metrics
+
+      - job_name: "cloudcare-audit-service"
+        static_configs:
+          - targets: ["audit-service.prod.svc.cluster.local:8003"]
+        metrics_path: /metrics
+
+      - job_name: "cloudcare-notification-service"
+        static_configs:
+          - targets: ["notification-service.prod.svc.cluster.local:8004"]
+        metrics_path: /metrics
+
+# ── Grafana ───────────────────────────────────────────────────────────────────
+grafana:
+  enabled: true
+  adminPassword: "cloudcare-grafana"   # password to log into Grafana UI
+
+  # Tell Grafana to auto-load dashboards from ConfigMaps in any namespace
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: "ALL"
+
+  # Add Loki as a second datasource so Grafana can show logs too
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki.monitoring.svc.cluster.local:3100
+      access: proxy
+
+# ── AlertManager ──────────────────────────────────────────────────────────────
+alertmanager:
+  enabled: true   # receives alerts from Prometheus and routes them (email/Slack etc)
+
+# ── Node Exporter ─────────────────────────────────────────────────────────────
+nodeExporter:
+  enabled: true   # runs on every node, collects node-level CPU + memory + disk metrics
+
+# ── Kube State Metrics ────────────────────────────────────────────────────────
+kubeStateMetrics:
+  enabled: true   # watches the K8s API and exports pod counts, deployment status etc

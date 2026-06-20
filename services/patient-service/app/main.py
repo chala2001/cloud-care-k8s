@@ -3,6 +3,7 @@ import logging
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from . import models, schemas
 from .database import get_db, create_tables
@@ -15,6 +16,10 @@ app = FastAPI(
     description="Manages patient records for CloudCare-K8s",
     version="1.0.0",
 )
+
+# Expose /metrics endpoint — Prometheus scrapes this every 15s to collect
+# request counts, latency histograms, and error rates for this service
+Instrumentator().instrument(app).expose(app)
 
 AUDIT_SERVICE_URL = os.environ.get("AUDIT_SERVICE_URL", "http://audit-service:8003")
 

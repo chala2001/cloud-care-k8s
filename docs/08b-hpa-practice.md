@@ -267,4 +267,5 @@ Normal — there is a 5-minute cooldown window. This is intentional (see 08a sec
 - [ ] You can explain: why does scale-down take 5 minutes but scale-up is fast?
 
 Next: **[09a — Observability Concepts](09a-observability-concepts.md)** — understand
-how Prometheus and Grafana give you visibility into your running services.
+what the three-pillar observability stack is and how Prometheus, Grafana, and Loki
+each work before installing them.

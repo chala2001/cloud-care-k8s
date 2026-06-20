@@ -4,6 +4,7 @@ import logging
 import boto3
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from .schemas import AuditEventIn, AuditEventOut
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -14,6 +15,8 @@ app = FastAPI(
     description="Stores audit events in DynamoDB. Internal service only.",
     version="1.0.0",
 )
+
+Instrumentator().instrument(app).expose(app)
 
 DYNAMODB_TABLE    = os.environ.get("DYNAMODB_TABLE", "audit_events")
 AWS_REGION        = os.environ.get("AWS_DEFAULT_REGION", "ap-south-1")

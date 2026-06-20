@@ -1,0 +1,59 @@
+# monitoring/prometheus/alerts.yaml
+# Applied with: kubectl apply -f monitoring/prometheus/alerts.yaml
+# Prometheus reads this and fires alerts when the conditions become true
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule          # this is a custom K8s resource installed by kube-prometheus-stack
+metadata:
+  name: cloudcare-alerts
+  namespace: monitoring       # must be in the same namespace as Prometheus
+  labels:
+    release: kube-prometheus-stack   # this label tells Prometheus to pick up this rule file
+spec:
+  groups:
+    - name: cloudcare.pods
+      rules:
+
+        # Alert 1: a pod is crash-looping
+        - alert: PodCrashLooping
+          expr: rate(kube_pod_container_status_restarts_total{namespace="prod"}[5m]) > 0
+          # expr is a PromQL query — "rate of pod restarts in the last 5 minutes > 0"
+          for: 2m             # only fire if this is true for 2 minutes continuously (avoids flaps)
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ $labels.pod }} is crash-looping"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted more than once in the last 5 minutes."
+
+    - name: cloudcare.http
+      rules:
+
+        # Alert 2: more than 10% of requests to a service are returning 5xx errors
+        - alert: HighErrorRate
+          expr: |
+            rate(http_requests_total{namespace="prod", status=~"5.."}[5m])
+            /
+            rate(http_requests_total{namespace="prod"}[5m])
+            > 0.1
+          # divide error requests by total requests — if result > 0.1 that means >10% errors
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High error rate on {{ $labels.job }}"
+            description: "More than 10% of requests to {{ $labels.job }} are returning 5xx errors."
+
+        # Alert 3: P99 latency above 1 second
+        - alert: HighLatency
+          expr: |
+            histogram_quantile(0.99,
+              rate(http_request_duration_seconds_bucket{namespace="prod"}[5m])
+            ) > 1
+          # histogram_quantile(0.99, ...) = the 99th percentile latency
+          # > 1 means 99% of requests take longer than 1 second
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High latency on {{ $labels.job }}"
+            description: "P99 latency for {{ $labels.job }} is above 1 second."

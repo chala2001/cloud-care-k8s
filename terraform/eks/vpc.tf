@@ -92,7 +92,7 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
-  # No internet route — DB subnets only. EKS nodes are in public subnets with direct IGW access.
+  # No internet route — both private subnets (internal ALBs) and database subnets share this route table.
   tags = { Name = "cloudcare-k8s-private-rt" }
 }
 

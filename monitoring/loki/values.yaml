@@ -1,0 +1,30 @@
+# monitoring/loki/values.yaml
+# Passed to: helm install loki-stack
+# Installs Loki (log storage) + Promtail (log collector agent on every node)
+
+loki:
+  enabled: true
+
+  # Store logs in memory/local disk — fine for a lab cluster
+  # In real prod you would use s3: { bucketName: "...", region: "..." }
+  storage:
+    type: filesystem
+
+  # How long to keep logs before deleting them
+  limits_config:
+    retention_period: 24h   # 24 hours is enough for a lab
+
+# ── Promtail ──────────────────────────────────────────────────────────────────
+# Promtail runs as a DaemonSet — one pod on EVERY node
+# It tails /var/log/containers/*.log and ships everything to Loki
+promtail:
+  enabled: true
+  config:
+    clients:
+      - url: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+        # this is the Loki URL inside the cluster — Promtail pushes logs here
+
+# ── Grafana ───────────────────────────────────────────────────────────────────
+# We already installed Grafana via kube-prometheus-stack — don't install it again
+grafana:
+  enabled: false

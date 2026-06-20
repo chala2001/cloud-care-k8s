@@ -3,6 +3,7 @@ import logging
 import boto3
 from fastapi import FastAPI, HTTPException
 from botocore.exceptions import ClientError
+from prometheus_fastapi_instrumentator import Instrumentator
 from .schemas import NotificationRequest, NotificationResponse
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -13,6 +14,8 @@ app = FastAPI(
     description="Sends email notifications via SES. Internal service only.",
     version="1.0.0",
 )
+
+Instrumentator().instrument(app).expose(app)
 
 SES_FROM_ADDRESS = os.environ.get("SES_FROM_ADDRESS", "noreply@example.com")
 AWS_REGION       = os.environ.get("AWS_DEFAULT_REGION", "ap-south-1")
