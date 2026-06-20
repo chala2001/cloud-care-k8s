@@ -38,7 +38,7 @@ def health():
     return {"status": "ok", "service": "patient-service"}
 
 
-# ── Internal helper ───────────────────────────────────────────────────────────
+# ── Internal helper ───────────────────────
 
 async def fire_audit(entity_id: int, action: str):
     """

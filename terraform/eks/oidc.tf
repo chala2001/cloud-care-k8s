@@ -41,7 +41,7 @@ resource "aws_iam_role" "github_deploy" {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:your-github-username/cloud-care-k8s:*"
+          "token.actions.githubusercontent.com:sub" = "repo:your-github-chala2001/cloud-care-k8s:*"
           # only YOUR repo can assume this role — forks cannot
           # replace "your-github-username" with your actual GitHub username
         }
