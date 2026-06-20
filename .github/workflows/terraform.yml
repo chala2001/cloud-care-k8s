@@ -66,11 +66,8 @@ jobs:
 
       - name: Terraform Plan
         id: plan
-        run: terraform plan -no-color -out=tfplan
-        # -no-color: plain text output (GitHub comments don't render ANSI colours)
-        # -out=tfplan: saves the plan to a file so apply uses the exact same plan
+        run: terraform plan -no-color
         continue-on-error: true
-        # continue-on-error: plan errors are shown as a PR comment, not a silent failure
 
       - name: Post plan as PR comment
         if: github.event_name == 'pull_request'
@@ -87,16 +84,10 @@ jobs:
               repo: context.repo.repo,
               body: output
             });
-        # posts the plan output directly on the PR so you can review before merging
-        # you see exactly what will change in AWS before clicking "Merge"
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        # only apply on direct pushes to main (i.e. after PR is merged)
-        # NEVER apply on PRs — we only plan on PRs
-        run: terraform apply -auto-approve tfplan
-        # -auto-approve: skip the interactive "yes" prompt (CI can't type)
-        # tfplan: uses the exact plan file from the plan step — no surprises
+        run: terraform apply -auto-approve
 
   # ── Job 2: Plan and apply platform stack (depends on eks) ────────────────────
   platform:
@@ -139,7 +130,7 @@ jobs:
 
       - name: Terraform Plan
         id: plan
-        run: terraform plan -no-color -out=tfplan
+        run: terraform plan -no-color
         continue-on-error: true
 
       - name: Post plan as PR comment
@@ -160,4 +151,4 @@ jobs:
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -auto-approve
