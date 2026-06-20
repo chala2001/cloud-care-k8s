@@ -35,7 +35,7 @@ def startup():
 
 @app.get("/health", tags=["health"])
 def health():
-    return {"status": "ok", "service": "patient-service"}
+    return {"status": "ok", "service": "patient-service", "version": "2.0"}
 
 
 # ── Internal helper ───────────────────────
