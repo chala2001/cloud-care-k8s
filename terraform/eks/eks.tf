@@ -36,6 +36,11 @@ resource "aws_eks_cluster" "main" {
     security_group_ids = [aws_security_group.eks_cluster.id]
   }
 
+  access_config {
+    authentication_mode                         = "API_AND_CONFIG_MAP"
+    bootstrap_cluster_creator_admin_permissions = true
+  }
+
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
   # Terraform must attach the IAM policy BEFORE creating the cluster
   # depends_on makes this ordering explicit
@@ -125,4 +130,23 @@ resource "aws_eks_node_group" "workers" {
     aws_iam_role_policy_attachment.ecr_read_only,
   ]
   # all 3 IAM policies must be attached before nodes can join the cluster
+}
+
+# ── EKS Access Entry for GitHub Actions ───────────────────────────────────────
+# Grants the GitHub Actions IAM role cluster-admin access so Terraform
+# can deploy Helm charts (ALB controller, metrics-server) from CI
+resource "aws_eks_access_entry" "github_actions" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.github_deploy.arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "github_actions" {
+  cluster_name  = aws_eks_cluster.main.name
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  principal_arn = aws_iam_role.github_deploy.arn
+
+  access_scope {
+    type = "cluster"
+  }
 }
