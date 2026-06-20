@@ -31,7 +31,7 @@ def startup():
     logger.info("patient-service started, tables ready")
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
+# ── Health check ──────────────────────────────────────────────────
 
 @app.get("/health", tags=["health"])
 def health():

@@ -22,7 +22,7 @@ DYNAMODB_TABLE    = os.environ.get("DYNAMODB_TABLE", "audit_events")
 AWS_REGION        = os.environ.get("AWS_DEFAULT_REGION", "ap-south-1")
 DYNAMODB_ENDPOINT = os.environ.get("DYNAMODB_ENDPOINT_URL")  # set for local dev
 
-# Build the boto3 resource — endpoint_url is None in production (uses real AWS)
+# Build the boto3 resource — endpoint_url is None in production (uses real AWS) .
 dynamodb = boto3.resource(
     "dynamodb",
     region_name=AWS_REGION,
