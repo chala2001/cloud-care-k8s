@@ -5,7 +5,7 @@
 > to a **microservices architecture orchestrated on Kubernetes** — the way modern
 > engineering teams actually run production workloads.
 
-**Region** `ap-south-1` (Mumbai) · **IaC** Terraform 1.9+ · **Orchestration** Kubernetes 1.30 on EKS ·
+**Region** `ap-south-1` (Mumbai) · **IaC** Terraform 1.10+ · **Orchestration** Kubernetes 1.30 on EKS ·
 **Backend** Python 3.12 + FastAPI (4 microservices) · **CI/CD** GitHub Actions + OIDC ·
 **Observability** Prometheus + Grafana + Loki
 
@@ -35,16 +35,16 @@ give the infrastructure something real to host and operate.
 | Concern | CloudCare v1 (EC2/ASG) | CloudCare-K8s v2 (EKS) |
 |---|---|---|
 | Deployment unit | Single FastAPI monolith | 4 independent microservices |
-| Compute | EC2 Auto Scaling Group | EKS node group (t3.small) |
+| Compute | EC2 Auto Scaling Group | EKS node group (t3.small × 3) |
 | Scaling | ASG instance-refresh (~5 min) | HPA pod scale-out (~30 sec) |
 | Rollout strategy | New AMI, wait for health check | Kubernetes rolling deploy |
 | Rollback | Re-push previous image | `helm rollback <service> <revision>` |
 | Image tagging | `:latest` | Git SHA (`:abc1234`) — immutable |
 | Secrets | Fetched at EC2 boot | K8s Secrets created from Secrets Manager |
-| Observability | CloudWatch only | Prometheus + Grafana + Loki + CloudWatch |
+| Observability | CloudWatch only | Prometheus + Grafana + Loki + AlertManager |
 | Config management | Env vars baked into launch template | ConfigMaps + Secrets per namespace |
 | Multi-environment | Single environment | `dev` and `prod` namespaces |
-| CI/CD scope | One pipeline for the whole backend | One pipeline **per service** |
+| CI/CD scope | One pipeline for the whole backend | One pipeline **per service** + one for Terraform |
 
 ---
 
@@ -58,7 +58,7 @@ give the infrastructure something real to host and operate.
         <img src="https://img.shields.io/badge/AWS-232F3E?style=for-the-badge&logo=amazonwebservices&logoColor=white" alt="AWS"/>
         <img src="https://img.shields.io/badge/Kubernetes%201.30-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white" alt="Kubernetes"/>
         <img src="https://img.shields.io/badge/Amazon%20EKS-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white" alt="EKS"/>
-        <img src="https://img.shields.io/badge/Terraform%201.9-7B42BC?style=for-the-badge&logo=terraform&logoColor=white" alt="Terraform"/>
+        <img src="https://img.shields.io/badge/Terraform%201.10-7B42BC?style=for-the-badge&logo=terraform&logoColor=white" alt="Terraform"/>
         <img src="https://img.shields.io/badge/Helm%203-0F1689?style=for-the-badge&logo=helm&logoColor=white" alt="Helm 3"/>
       </p>
       <sub>EKS managed control plane; Terraform declares every resource; Helm packages per-service charts with dev/prod value overlays.</sub>
@@ -71,7 +71,7 @@ give the infrastructure something real to host and operate.
         <img src="https://img.shields.io/badge/ALB%20Ingress-FF9900?style=for-the-badge" alt="ALB Ingress"/>
         <img src="https://img.shields.io/badge/VPC-232F3E?style=for-the-badge&logo=amazonaws&logoColor=white" alt="VPC"/>
       </p>
-      <sub>EKS t3.small node group in public subnets (direct IGW access); one ECR repo per service; AWS ALB Ingress Controller routes external traffic via path-based rules.</sub>
+      <sub>EKS t3.small × 3 node group in public subnets (direct IGW access); one ECR repo per service; AWS ALB Ingress Controller routes external traffic via path-based rules.</sub>
     </td>
     <td width="33%" valign="top">
       <h4>Edge (v1 — cloud-care repo)</h4>
@@ -79,7 +79,7 @@ give the infrastructure something real to host and operate.
         <img src="https://img.shields.io/badge/CloudFront-8C4FFF?style=for-the-badge" alt="CloudFront"/>
         <img src="https://img.shields.io/badge/S3%20%28static%29-569A31?style=for-the-badge&logo=amazons3&logoColor=white" alt="S3 static"/>
       </p>
-      <sub>Defined in the companion cloud-care (v1) repo — not in this repo. CloudFront serves the React SPA from private S3 and forwards /api/* to this cluster's ALB Ingress.</sub>
+      <sub>Defined in the companion cloud-care (v1) repo — not in this repo.</sub>
     </td>
   </tr>
   <tr>
@@ -98,9 +98,9 @@ give the infrastructure something real to host and operate.
         <img src="https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white" alt="Prometheus"/>
         <img src="https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white" alt="Grafana"/>
         <img src="https://img.shields.io/badge/Loki-F46800?style=for-the-badge" alt="Loki"/>
-        <img src="https://img.shields.io/badge/CloudWatch-FF4F8B?style=for-the-badge&logo=amazoncloudwatch&logoColor=white" alt="CloudWatch"/>
+        <img src="https://img.shields.io/badge/AlertManager-E6522C?style=for-the-badge" alt="AlertManager"/>
       </p>
-      <sub>Prometheus scrapes all pods; Grafana dashboards service health & latency; Loki aggregates logs via Promtail; CloudWatch covers AWS-native resources (RDS, ALB, EKS control plane).</sub>
+      <sub>Prometheus scrapes /metrics from all 4 services every 15s; Grafana pre-built Kubernetes dashboards + custom PromQL; Loki aggregates logs via Promtail DaemonSet; AlertManager fires on CrashLoop, high error rate, and high latency.</sub>
     </td>
     <td width="33%" valign="top">
       <h4>Identity &amp; CI/CD</h4>
@@ -108,7 +108,7 @@ give the infrastructure something real to host and operate.
         <img src="https://img.shields.io/badge/IAM%20%2B%20IRSA-DD344C?style=for-the-badge" alt="IAM + IRSA"/>
         <img src="https://img.shields.io/badge/GitHub%20Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white" alt="GitHub Actions"/>
       </p>
-      <sub>IRSA gives each pod its own AWS identity — no node-level credentials; keyless CI via OIDC; one pipeline per service for independent deployability.</sub>
+      <sub>IRSA gives each pod its own AWS identity — no node-level credentials; keyless CI via OIDC; one pipeline per service + one Terraform pipeline; concurrency groups prevent Helm lock conflicts.</sub>
     </td>
   </tr>
   <tr>
@@ -117,7 +117,7 @@ give the infrastructure something real to host and operate.
       <p>
         <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI"/>
       </p>
-      <sub>4 Python 3.12 FastAPI microservices — the simplest CRUD needed to give the Kubernetes infrastructure something real to run. No frontend code in this repo.</sub>
+      <sub>4 Python 3.12 FastAPI microservices — each exposes /metrics endpoint via prometheus-fastapi-instrumentator for Prometheus scraping.</sub>
     </td>
     <td width="33%" valign="top">
       <h4>Local Dev</h4>
@@ -149,9 +149,10 @@ give the infrastructure something real to host and operate.
 | 5 | **IRSA least-privilege** — pod-level AWS identity, not node-level credentials | `terraform/platform/irsa.tf` |
 | 6 | **K8s Secrets from Secrets Manager** — credentials never in Git or Helm values | `k8s/` + deploy scripts |
 | 7 | **Multi-environment** — `dev` vs `prod` namespace via Helm value overlays | `helm/*/values-prod.yaml` |
-| 8 | **Three-pillar observability** — metrics (Prometheus), logs (Loki), dashboards (Grafana) | `docs/09-observability.md` |
+| 8 | **Three-pillar observability** — metrics (Prometheus), logs (Loki), dashboards (Grafana), alerts (AlertManager) | `monitoring/` |
 | 9 | **Keyless CI/CD** — GitHub OIDC, no stored AWS keys, `sub` claim pinned to repo | `terraform/eks/oidc.tf` |
 | 10 | **Database-per-service pattern** — schema isolation, service-specific DB users | `docs/02-microservices-split.md` |
+| 11 | **Pipeline concurrency control** — `concurrency` groups prevent simultaneous Helm upgrades locking the same release | `.github/workflows/deploy-*.yml` |
 
 ---
 
@@ -174,6 +175,7 @@ give the infrastructure something real to host and operate.
 - [Local development](#local-development)
 - [Cost](#cost)
 - [Teardown](#teardown)
+- [Known issues & resolutions](#known-issues--resolutions)
 - [Documentation & learning path](#documentation--learning-path)
 
 ---
@@ -190,7 +192,8 @@ ECR repo, Helm chart, and GitHub Actions pipeline. Services talk to a private
 **Secrets Manager** and pulled into **Kubernetes Secrets** at deploy time.
 
 The audit-service writes to **DynamoDB** via IRSA (no stored AWS keys). The notification-service
-sends email via **SES**, also via IRSA.
+sends email via **SES**, also via IRSA. The `monitoring` namespace runs Prometheus, Grafana,
+Loki, and AlertManager — all installed via Helm.
 
 ---
 
@@ -205,7 +208,7 @@ flowchart TB
 
         subgraph Pub["Public subnets 10.0.0.0/24, 10.0.1.0/24 (AZ-a, AZ-b)"]
             ALB["AWS ALB\n(ALB Ingress Controller)"]
-            Nodes["EKS Worker Nodes\nt3.small × 2\n(EKS pods run here)"]
+            Nodes["EKS Worker Nodes\nt3.small × 3\n(EKS pods run here)"]
         end
 
         subgraph DBT["Private DB subnets 10.0.20.0/24, 10.0.21.0/24 (AZ-a, AZ-b)"]
@@ -213,11 +216,19 @@ flowchart TB
         end
     end
 
-    subgraph EKS["EKS Cluster — prod namespace"]
-        PS["patient-service :8001"]
-        APPS["appointment-service :8002"]
-        AUS["audit-service :8003"]
-        NS2["notification-service :8004"]
+    subgraph EKS["EKS Cluster"]
+        subgraph prod["prod namespace"]
+            PS["patient-service :8001"]
+            APPS["appointment-service :8002"]
+            AUS["audit-service :8003"]
+            NS2["notification-service :8004"]
+        end
+        subgraph monitoring["monitoring namespace"]
+            PROM["Prometheus"]
+            GRAF["Grafana"]
+            LOKI["Loki + Promtail"]
+            AM["AlertManager"]
+        end
     end
 
     subgraph AWSsvc["AWS Services"]
@@ -228,7 +239,7 @@ flowchart TB
         CW["CloudWatch"]
     end
 
-    User -- HTTPS/HTTP --> ALB
+    User -- HTTP --> ALB
     IGW --- ALB
     IGW --- Nodes
     ALB --> PS & APPS & AUS & NS2
@@ -237,6 +248,8 @@ flowchart TB
     NS2 -- "IRSA" --> SES
     SM -. "pulled at deploy" .-> PS & APPS
     PS & APPS & AUS & NS2 -. "pull image" .-> ECR
+    PROM -. "scrape /metrics" .-> PS & APPS & AUS & NS2
+    LOKI -. "collect logs" .-> PS & APPS & AUS & NS2
     CW -. "AWS metrics" .-> RDS & ALB
 ```
 
@@ -254,11 +267,11 @@ GitHub Actions workflow, and database schema.
 | `audit-service` | 8003 | `POST /audit`, `GET /audit` | DynamoDB — `audit_events` table |
 | `notification-service` | 8004 | `POST /notify` | — (calls SES, no persistence) |
 
+All 4 services expose `/metrics` (via `prometheus-fastapi-instrumentator`) and `/health`.
+
 ---
 
 ## Request flow
-
-A typical "create a patient, book an appointment" sequence:
 
 ```mermaid
 sequenceDiagram
@@ -330,21 +343,18 @@ flowchart TB
 | CIDR | Tier | Public? | Purpose |
 |------|------|---------|---------|
 | `10.0.0.0/24`, `10.0.1.0/24` | Public | ✅ (→ IGW) | ALB Ingress + EKS worker nodes |
-| `10.0.10.0/24`, `10.0.11.0/24` | App (private) | ❌ (unused) | Reserved — not currently used |
+| `10.0.10.0/24`, `10.0.11.0/24` | App (private) | ❌ (unused) | Reserved |
 | `10.0.20.0/24`, `10.0.21.0/24` | DB (private) | ❌ (local only) | RDS PostgreSQL |
 
-> **Why nodes are in public subnets:** The original design placed nodes in private subnets
-> with a NAT instance for ECR access. During deployment, nodes failed to join the cluster
-> (NodeCreationFailure after 33+ minutes) because the DIY NAT instance couldn't reliably
-> forward traffic to the EKS API endpoint and ECR. Moving nodes to public subnets (direct
-> IGW access) resolved the issue immediately. Security is maintained via Security Groups —
-> no SSH ports are open, and pod traffic is controlled by EKS-managed security groups.
+> **Why nodes are in public subnets:** Originally placed in private subnets with a NAT instance.
+> Nodes failed to join the cluster after 33+ minutes (NodeCreationFailure) because the NAT
+> instance couldn't reliably route EKS API and ECR traffic. Moving nodes to public subnets
+> (direct IGW) resolved the issue. Security is maintained via Security Groups — no SSH ports
+> open, pod traffic controlled by EKS-managed security groups.
 
 ---
 
 ## Security architecture
-
-### Defense in depth — the security-group chain
 
 ```mermaid
 flowchart LR
@@ -357,11 +367,10 @@ flowchart LR
     style D   fill:#fee2e2,stroke:#b91c1c,color:#000
 ```
 
-### IAM principles applied
-
-- **No long-lived AWS keys in GitHub** — CI authenticates via GitHub OIDC → `sts:AssumeRoleWithWebIdentity` → 1-hour creds per job
-- **IRSA per pod** — audit-service and notification-service each have their own IAM role. A compromised pod cannot use another service's permissions
+- **No long-lived AWS keys in GitHub** — CI authenticates via GitHub OIDC → `sts:AssumeRoleWithWebIdentity` → 15-min temp credentials per job
+- **IRSA per pod** — audit-service and notification-service each have their own IAM role
 - **IMDSv2 enforced** on all EKS nodes (`http_tokens = "required"`) to block SSRF-based credential theft
+- **EKS access entries** — GitHub Actions IAM role granted cluster-admin via `aws_eks_access_entry` (API mode), not via aws-auth ConfigMap
 - **RDS not publicly accessible** — `publicly_accessible = false`, SG allows only VPC traffic on port 5432
 - **Secrets never in Git** — DB credentials live in Secrets Manager, pulled into K8s Secrets at deploy time
 
@@ -375,17 +384,25 @@ flowchart TB
         subgraph SVC["patient-service"]
             D1["Deployment (replicas: 2)"]
             SVC1["Service ClusterIP :8001"]
-            HPA1["HPA — target CPU 70%"]
+            HPA1["HPA — target CPU 70%, max 6 pods"]
             SA1["ServiceAccount\n+ IRSA annotation (audit/notif only)"]
             SEC1["K8s Secret\npatient-service-db-secret\n(DATABASE_URL)"]
         end
         ING["Ingress (ALB)\n/patients → patient-service\n/appointments → appointment-service\n/audit → audit-service\n/notify → notification-service"]
     end
 
+    subgraph MON["Namespace: monitoring"]
+        PROM["kube-prometheus-stack\n(Prometheus + Grafana + AlertManager)"]
+        LOKI2["loki-stack\n(Loki + Promtail DaemonSet)"]
+        RULES["PrometheusRule\ncloudcare-alerts\n(CrashLoop, HighErrorRate, HighLatency)"]
+    end
+
     ING --> SVC1 --> D1
     HPA1 -. scales .-> D1
     SEC1 -. env var .-> D1
     SA1 -. pod identity .-> D1
+    PROM -. scrapes /metrics .-> D1
+    LOKI2 -. collects logs .-> D1
 ```
 
 ---
@@ -435,14 +452,14 @@ Three Terraform stacks, each with its own state key in S3:
 ```
 s3://cloudcare-k8s-tfstate-<account>/
   bootstrap/terraform.tfstate   ← local state only (run once)
-  eks/terraform.tfstate          ← VPC, EKS, ECR, OIDC
+  eks/terraform.tfstate          ← VPC, EKS, ECR, OIDC, EKS access entries
   platform/terraform.tfstate     ← RDS, Secrets Manager, ALB controller, IRSA, DynamoDB
 ```
 
 ```mermaid
 flowchart TB
     BS["bootstrap\nS3 state bucket (run once, costs cents)"]
-    EKS["eks\nVPC · subnets · IGW\nEKS cluster · t3.small node group\n4× ECR repos · OIDC provider\nGitHub OIDC + deploy IAM role"]
+    EKS["eks\nVPC · subnets · IGW\nEKS cluster · t3.small × 3 node group\n4× ECR repos · OIDC provider\nGitHub OIDC + deploy IAM role\nEKS access entry for CI role"]
     PLAT["platform\nRDS PostgreSQL · Secrets Manager\nALB Ingress Controller (Helm)\nMetrics Server (Helm)\nDynamoDB audit_events\nIRSA roles (audit + notification)"]
 
     BS -.->|hosts state for| EKS & PLAT
@@ -452,7 +469,7 @@ flowchart TB
 | Stack | Apply time | Destroyable? | Cost if left running |
 |-------|-----------|--------------|----------------------|
 | `bootstrap` | ~1 min | ❌ (holds all state) | ~cents/mo |
-| `eks` | ~15 min | ✅ | ~$5–8/day |
+| `eks` | ~15 min | ✅ | ~$6–9/day |
 | `platform` | ~8 min | ✅ | ~$1–2/day |
 
 ---
@@ -477,31 +494,62 @@ build job
   ├── docker build -t <ecr-url>/<service>:<git-sha> .
   └── docker push :<git-sha>      ← immutable tag
 
-deploy-dev (branch = dev)
-  └── helm upgrade --install <service> ./helm/<service>
-        -f helm/<service>/values-dev.yaml
-        --set image.tag=<git-sha>
-        --namespace dev
+deploy-dev (branch = dev)          deploy-prod (branch = main)
+  └── helm upgrade --install         └── helm upgrade --install
+        --namespace dev                    --namespace prod
+        -f values-dev.yaml                 -f values-prod.yaml
+        --set image.tag=<sha>              --set image.tag=<sha>
+        (no --wait — dev has no DB)        --wait --timeout 5m
+```
 
-deploy-prod (branch = main)
-  └── helm upgrade --install <service> ./helm/<service>
-        -f helm/<service>/values-prod.yaml
-        --set image.tag=<git-sha>
-        --namespace prod
+Each workflow has a **concurrency group** (`deploy-<service>-<branch>`) to prevent simultaneous
+runs from causing Helm lock conflicts (`another operation is in progress`).
+
+### Terraform pipeline
+
+```
+eks job                          platform job (needs: eks)
+  ├── terraform init               ├── terraform init
+  ├── terraform plan               ├── terraform plan
+  └── terraform apply              └── terraform apply
+      (on push to main only)           (on push to main only)
 ```
 
 ---
 
 ## Observability
 
-Three pillars planned in the `monitoring` namespace (see [docs/09-observability.md](docs/09-observability.md)):
+Deployed in the `monitoring` namespace via Helm:
 
-| Signal | Source | Tool |
-|--------|--------|------|
-| Pod metrics (CPU, memory, RPS) | Prometheus scrape | Grafana dashboard |
-| Pod logs | Promtail DaemonSet | Loki → Grafana |
-| RDS / ALB metrics | CloudWatch | Grafana AWS datasource |
-| HPA decisions | metrics-server | `kubectl top pods` |
+| Component | Helm chart | Purpose |
+|-----------|-----------|---------|
+| Prometheus | `kube-prometheus-stack` | Scrapes `/metrics` from all pods every 15s |
+| Grafana | `kube-prometheus-stack` | Dashboards — pre-built K8s + custom PromQL |
+| AlertManager | `kube-prometheus-stack` | Fires alerts: CrashLoop, HighErrorRate (>10% 5xx), HighLatency (P99 > 1s) |
+| Loki | `loki-stack` | Stores pod logs (24h retention, filesystem) |
+| Promtail | `loki-stack` | DaemonSet that ships pod logs to Loki |
+
+**Access Grafana locally:**
+```bash
+kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n monitoring
+# Open http://localhost:3000 — admin / cloudcare-grafana
+```
+
+**Useful PromQL queries:**
+```promql
+up{job=~"cloudcare.*"}                          # are all 4 services reachable?
+rate(http_requests_total{job=~"cloudcare.*"}[5m]) # request rate per service
+histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) # P99 latency
+```
+
+**Alert rules** — defined in `monitoring/prometheus/alerts.yaml` (PrometheusRule CRD):
+- `PodCrashLooping` — pod restart rate > 0 for 5 minutes
+- `HighErrorRate` — HTTP 5xx rate > 10% for 5 minutes
+- `HighLatency` — P99 latency > 1 second for 5 minutes
+
+> **Node capacity note:** t3.small nodes support max 11 pods each (AWS VPC CNI limit).
+> With 3 nodes (33 total slots), there is enough room for all prod services + monitoring stack.
+> With 2 nodes, monitoring stack exhausted capacity — this is why the node group uses 3 nodes.
 
 ---
 
@@ -526,41 +574,52 @@ cloud-care-k8s/
 ├── helm/                              ← one Helm chart per service
 │   └── <service>/
 │       ├── Chart.yaml
-│       ├── values.yaml                ← base defaults (local dev)
+│       ├── values.yaml                ← base defaults
+│       ├── values-dev.yaml            ← dev overrides (1 replica, no HPA, plain secrets)
 │       ├── values-prod.yaml           ← prod overrides (2 replicas, HPA, IRSA, prod image)
 │       └── templates/
-│           ├── deployment.yaml        ← reads databaseSecretName or databaseUrl
+│           ├── deployment.yaml
 │           ├── service.yaml
 │           ├── hpa.yaml
-│           ├── serviceaccount.yaml    ← created only if serviceAccount.roleArn is set
+│           ├── serviceaccount.yaml
 │           └── _helpers.tpl
 │
 ├── k8s/
-│   └── ingress.yaml                   ← single ALB Ingress for all 4 services (path-based)
+│   └── ingress.yaml                   ← ALB Ingress (ingressClassName in spec, not metadata)
+│
+├── monitoring/
+│   ├── prometheus/
+│   │   ├── values.yaml                ← kube-prometheus-stack Helm values
+│   │   │                                 (scrape configs, Grafana password, Loki datasource)
+│   │   └── alerts.yaml                ← PrometheusRule CRD (3 alert rules)
+│   └── loki/
+│       └── values.yaml                ← loki-stack Helm values (filesystem storage, 24h retention)
 │
 ├── terraform/
 │   ├── bootstrap/main.tf              ← S3 state bucket (run once)
 │   ├── eks/
-│   │   ├── backend.tf                 ← S3 backend + provider versions
+│   │   ├── backend.tf                 ← S3 backend (use_lockfile=true, requires Terraform 1.10+)
 │   │   ├── vpc.tf                     ← VPC, subnets, IGW, route tables
-│   │   ├── eks.tf                     ← EKS cluster, node group (public subnets, t3.small)
+│   │   ├── eks.tf                     ← EKS cluster (API_AND_CONFIG_MAP auth mode)
+│   │   │                                 node group: t3.small × 3, public subnets
+│   │   │                                 EKS access entry for GitHub Actions IAM role
 │   │   ├── ecr.tf                     ← 4 ECR repos
 │   │   ├── oidc.tf                    ← EKS OIDC + GitHub OIDC + deploy IAM role
-│   │   └── outputs.tf                 ← vpc_id, subnet IDs, cluster_name, oidc ARN/URL
+│   │   └── outputs.tf
 │   └── platform/
-│       ├── providers.tf               ← S3 backend, provider versions (aws ~>6.0, helm ~>3.0)
+│       ├── providers.tf               ← S3 backend, aws ~>6.0, helm ~>3.0
 │       ├── remote_state.tf            ← reads eks stack outputs
-│       ├── rds.tf                     ← RDS PostgreSQL, subnet group, SG, random password
-│       ├── secrets.tf                 ← Secrets Manager secrets (recovery_window_in_days=0)
+│       ├── rds.tf                     ← RDS PostgreSQL db.t3.micro
+│       ├── secrets.tf                 ← Secrets Manager (recovery_window_in_days=0)
 │       ├── alb.tf                     ← ALB Ingress Controller + metrics-server (Helm)
-│       └── irsa.tf                    ← DynamoDB table + IRSA roles for audit + notification
+│       └── irsa.tf                    ← DynamoDB table + IRSA roles
 │
 ├── .github/workflows/
-│   ├── deploy-patient-service.yml
+│   ├── deploy-patient-service.yml     ← concurrency group per branch
 │   ├── deploy-appointment-service.yml
 │   ├── deploy-audit-service.yml
 │   ├── deploy-notification-service.yml
-│   └── terraform.yml
+│   └── terraform.yml                  ← Terraform 1.10, inline apply (no tfplan file)
 │
 └── docs/                              ← numbered guides, one per phase
     ├── 00-roadmap.md
@@ -581,20 +640,20 @@ cloud-care-k8s/
 
 - **AWS account** with IAM admin user and MFA enabled
 - **AWS CLI v2** authenticated (`aws sts get-caller-identity` succeeds)
-- **Terraform** `>= 1.9`
+- **Terraform** `>= 1.10` (required for `use_lockfile` in S3 backend)
 - **kubectl** + **Helm 3** (`helm version`)
-- **Docker Desktop** (includes Docker Compose)
+- **Docker** with Compose plugin (`docker compose version`)
 - **Python 3.12** (for local dev — Docker is fine too)
 
 ---
 
 ## Quick Start — Deploy from Scratch
 
+> Run all commands from the **project root** (`cloud-care-k8s/`) unless noted otherwise.
+
 ### Phase 0 — Bootstrap Terraform state (run once ever)
 
 ```bash
-# Creates the S3 bucket that stores all Terraform state files.
-# Run once — never destroy this bucket.
 cd terraform/bootstrap
 terraform init
 terraform apply \
@@ -605,20 +664,14 @@ terraform apply \
 
 ```bash
 cd terraform/eks
-
-# Download providers and connect to S3 backend
 terraform init
-
-# Preview what will be created (VPC, EKS, ECR, OIDC)
 terraform plan
-
-# Create the infrastructure — EKS control plane starts billing (~$0.10/hr) from here
 terraform apply
 
-# Configure kubectl to talk to the new cluster
+# Configure kubectl
 aws eks update-kubeconfig --name cloudcare-k8s --region ap-south-1
 
-# Verify — should show 2 t3.small nodes in Ready state
+# Verify — should show 3 t3.small nodes in Ready state
 kubectl get nodes
 ```
 
@@ -626,23 +679,19 @@ kubectl get nodes
 
 ```bash
 cd terraform/platform
-
-# Download providers (helm ~>3.0, aws ~>6.0) and connect to S3 backend
 terraform init
-
+terraform apply
 # Creates: RDS PostgreSQL, Secrets Manager secrets,
 #          ALB Ingress Controller (Helm), Metrics Server (Helm),
-#          DynamoDB audit_events table, IRSA roles for audit + notification services
-terraform apply
+#          DynamoDB audit_events table, IRSA roles
 ```
 
-### Phase 3 — Initialize the database (one-time, after platform apply)
+### Phase 3 — Initialize the database (one-time)
 
-RDS creates the database with only the master user (`cloudcare_admin`).
-The service-specific users (`patient_svc`, `appt_svc`) must be created manually:
+RDS creates the database with only the master user. Service-specific users must be created manually:
 
 ```bash
-# Get all credentials from Terraform state (passwords are alphanumeric — safe to pass via env)
+# From terraform/platform directory
 MASTER_PASS=$(terraform state pull | python3 -c "
 import sys, json
 state = json.load(sys.stdin)
@@ -669,14 +718,10 @@ for r in state['resources']:
         print(urlparse('postgresql://' + ep).hostname)
 ")
 
-# Free up a node slot if needed (EKS nodes have limited pod capacity on t3.small)
-kubectl scale deployment patient-service appointment-service -n prod --replicas=0 2>/dev/null; true
-
-# Run a one-time psql pod inside the cluster to reach the private RDS
+# Run a one-time psql pod inside the cluster to reach private RDS
 kubectl run psql-init -n prod --restart=Never --image=postgres:16 -- sleep 300
 kubectl wait pod/psql-init -n prod --for=condition=Ready --timeout=60s
 
-# Create service users and grant schema permissions
 kubectl exec -n prod psql-init -- psql \
   "postgresql://cloudcare_admin:${MASTER_PASS}@${RDS_HOST}/cloudcare?sslmode=require" \
   -c "CREATE USER patient_svc WITH PASSWORD '${PATIENT_PASS}';" \
@@ -695,11 +740,7 @@ kubectl delete pod psql-init -n prod
 
 ### Phase 4 — Create K8s Secrets from Secrets Manager
 
-The services read `DATABASE_URL` from a Kubernetes Secret (not from Helm values — this
-avoids shell escaping problems with connection strings containing `://` and `@`):
-
 ```bash
-# Pull the full DATABASE_URL for each service from Secrets Manager
 PATIENT_DB_URL=$(aws secretsmanager get-secret-value \
   --secret-id cloudcare-k8s/patient-service/db --query SecretString --output text \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['DATABASE_URL'])")
@@ -708,8 +749,6 @@ APPT_DB_URL=$(aws secretsmanager get-secret-value \
   --secret-id cloudcare-k8s/appointment-service/db --query SecretString --output text \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['DATABASE_URL'])")
 
-# Create K8s Secrets in the prod namespace
-# These survive helm upgrade — they are NOT managed by Helm
 kubectl create secret generic patient-service-db-secret \
   --from-literal=DATABASE_URL="$PATIENT_DB_URL" \
   -n prod --dry-run=client -o yaml | kubectl apply -f -
@@ -721,52 +760,73 @@ kubectl create secret generic appointment-service-db-secret \
 
 ### Phase 5 — Build and deploy all services
 
+> Run from the **project root** `cloud-care-k8s/` — not from inside terraform/.
+
 ```bash
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGION=ap-south-1
 SHA=$(git rev-parse --short HEAD)
 
-# Log in to ECR (token valid for 12 hours)
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 
-# Build, push, and deploy each service
 for svc in patient-service appointment-service audit-service notification-service; do
   ECR="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/cloudcare-k8s-$svc"
-
-  # Build the Docker image tagged with git SHA
   ( cd services/$svc && docker build -t "$ECR:$SHA" . && docker push "$ECR:$SHA" )
-
-  # Deploy to prod — values-prod.yaml sets replicas=2, HPA enabled, IRSA ServiceAccount
   helm upgrade --install $svc ./helm/$svc \
     -f helm/$svc/values-prod.yaml \
     --set image.tag="$SHA" \
     --namespace prod --create-namespace
 done
 
-# Watch all 8 pods reach Running state
 kubectl get pods -n prod -w
 ```
 
-### Phase 6 — Apply Ingress and verify
+### Phase 6 — Deploy monitoring stack
 
 ```bash
-# Create the ALB Ingress (path-based routing to all 4 services)
+# Add Helm repos
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+# Install Prometheus + Grafana + AlertManager
+helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring --create-namespace \
+  -f monitoring/prometheus/values.yaml \
+  --version 58.3.1 --timeout 10m --wait
+
+# Install Loki + Promtail
+helm upgrade --install loki-stack grafana/loki-stack \
+  --namespace monitoring \
+  -f monitoring/loki/values.yaml \
+  --version 2.10.2 --timeout 10m --wait
+
+# Apply alert rules
+kubectl apply -f monitoring/prometheus/alerts.yaml
+
+# Access Grafana
+kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n monitoring
+# http://localhost:3000  admin / cloudcare-grafana
+```
+
+### Phase 7 — Apply Ingress and verify
+
+```bash
 kubectl apply -f k8s/ingress.yaml
 
-# Wait ~2 minutes for ALB to be provisioned, then get the DNS name
+# Wait ~2 min for ALB to be provisioned
 kubectl get ingress cloudcare-ingress -n prod
 
 ALB=$(kubectl get ingress cloudcare-ingress -n prod \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
 
-# Test the APIs
-curl "http://$ALB/health"                                       # → {"status":"ok"}
+curl "http://$ALB/health"
 curl -X POST "http://$ALB/patients" \
   -H "Content-Type: application/json" \
   -d '{"full_name":"Jane Doe","date_of_birth":"1990-01-01","phone":"+94771234567"}'
-curl "http://$ALB/patients"                                     # → [{"id":1,...}]
-curl "http://$ALB/audit"                                        # → audit events from DynamoDB
+curl "http://$ALB/patients"
+curl "http://$ALB/audit"
 ```
 
 ---
@@ -774,7 +834,6 @@ curl "http://$ALB/audit"                                        # → audit even
 ## Local Development
 
 ```bash
-# Run all 4 services + postgres + dynamodb-local
 cd services/
 docker compose up --build
 
@@ -791,13 +850,13 @@ docker compose up --build
 | Resource | Est. daily cost | Notes |
 |---|---|---|
 | EKS control plane | ~$2.40/day | No free tier — destroy when not working |
-| 2× t3.small nodes | ~$1.00/day | $0.023/hr each |
+| 3× t3.small nodes | ~$1.60/day | $0.023/hr each |
 | RDS `db.t3.micro` | ~$0.40/day | 750 hrs/mo free tier covers first year |
 | ALB (Ingress) | ~$0.50/day | Fixed hourly + LCU charge |
 | ECR (4 repos) | ~$0 | 500 MB/mo free tier |
 | DynamoDB | ~$0 | Pay-per-request; near-zero at lab volume |
 | Secrets Manager | ~$0.01/day | $0.40/secret/month |
-| **Estimated total** | **~$4.30/day** | Destroy EKS + platform when not working |
+| **Estimated total** | **~$4.90/day** | Destroy EKS + platform when not working |
 
 > **Workflow**: develop and iterate locally with Docker Compose (zero cost).
 > Spin up EKS only for integration tests. Destroy immediately after.
@@ -809,24 +868,69 @@ docker compose up --build
 Destroy in reverse-dependency order:
 
 ```bash
-# Uninstall Helm releases (removes K8s resources but NOT the RDS or ECR images)
-for svc in patient-service appointment-service audit-service notification-service; do
-  helm uninstall $svc -n prod 2>/dev/null || true
-done
-helm uninstall aws-load-balancer-controller -n kube-system 2>/dev/null || true
-helm uninstall metrics-server -n kube-system 2>/dev/null || true
+# 1. Uninstall monitoring stack
+helm uninstall kube-prometheus-stack -n monitoring
+helm uninstall loki-stack -n monitoring
 
-# Destroy platform stack first (RDS, DynamoDB, Secrets Manager, IAM roles)
-cd terraform/platform && terraform destroy -auto-approve
+# 2. Uninstall service releases
+helm uninstall patient-service appointment-service audit-service notification-service -n prod
+helm uninstall aws-load-balancer-controller -n kube-system
+helm uninstall metrics-server -n kube-system
 
-# Then destroy EKS stack (cluster, nodes, VPC, ECR)
-cd ../eks && terraform destroy -auto-approve
+# 3. Destroy platform stack (RDS, DynamoDB, Secrets Manager, IAM roles)
+cd terraform/platform && terraform destroy
 
-# Leave bootstrap/ alone — it holds all Terraform state and costs cents/month
+# 4. Destroy EKS stack (cluster, nodes, VPC, ECR)
+cd ../eks && terraform destroy
 ```
 
-> **Note:** Secrets Manager has a 7-day deletion window by default. The secrets.tf uses
-> `recovery_window_in_days = 0` to force-delete immediately, so re-apply works the next day.
+> **ALB cleanup warning:** The ALB created by the Ingress Controller is NOT managed by Terraform.
+> If `terraform destroy` hangs on subnets/VPC, the ALB or its ENIs are still alive.
+> Manual cleanup:
+> ```bash
+> # Delete the ALB
+> aws elbv2 delete-load-balancer --region ap-south-1 \
+>   --load-balancer-arn $(aws elbv2 describe-load-balancers --region ap-south-1 \
+>     --query 'LoadBalancers[?contains(LoadBalancerName,`k8s`)].LoadBalancerArn' --output text)
+>
+> # Delete leftover security groups created by the ALB controller
+> # (look for names starting with k8s-prod- or k8s-traffic-)
+> aws ec2 describe-security-groups --region ap-south-1 \
+>   --filters "Name=vpc-id,Values=<vpc-id>" \
+>   --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text \
+>   | xargs -n1 aws ec2 delete-security-group --region ap-south-1 --group-id
+>
+> # Then re-run terraform destroy — VPC will delete cleanly
+> ```
+
+> **ECR cleanup:** ECR repos containing images will block destroy.
+> Force-delete with: `aws ecr delete-repository --region ap-south-1 --repository-name <name> --force`
+
+> **Secrets Manager:** Uses `recovery_window_in_days = 0` to force-delete immediately,
+> so re-apply works the next day without "already scheduled for deletion" errors.
+
+---
+
+## Known Issues & Resolutions
+
+| Issue | Root Cause | Fix Applied |
+|-------|-----------|-------------|
+| NodeCreationFailure (33+ min timeout) | DIY NAT couldn't route EKS API / ECR traffic from private subnets | Moved node group to public subnets |
+| `t3.micro` nodes OOMKilled | Too little RAM for EKS CNI + system pods + app pods | Changed to `t3.small` |
+| ALB controller CrashLoopBackOff — `EC2MetadataError 401` | Controller couldn't discover VPC ID via IMDSv2 | Added explicit `vpcId` to Helm values in `alb.tf` |
+| `password authentication failed for user "patient_svc"` | Terraform creates Secrets Manager entries but never runs `CREATE USER` in PostgreSQL | Manual one-time psql pod init (Phase 3) |
+| `Secrets Manager: already scheduled for deletion` | Re-applied platform within 7-day deletion window | `recovery_window_in_days = 0` in `secrets.tf` |
+| `DATABASE_URL` KeyError / empty env var | `helm --set` mangles URLs containing `://` and `@` | K8s Secret + `secretKeyRef` in deployment template |
+| Helm provider v3 breaking change | `kubernetes {}` block syntax changed | Updated `providers.tf` and `alb.tf` |
+| Monitoring stack `Too many pods` timeout | t3.small nodes at max capacity (11 pods × 2 nodes = 22) | Scaled HPA minReplicas to 1, added 3rd node |
+| `unknown field metadata.ingressClassName` | `ingressClassName` placed under `metadata` instead of `spec` | Moved to `spec.ingressClassName: alb` in `k8s/ingress.yaml` |
+| CI/CD `Not authorized to perform sts:AssumeRoleWithWebIdentity` | OIDC trust policy had wrong GitHub username in `sub` claim | Fixed to `repo:chala2001/cloud-care-k8s:*` in `oidc.tf` |
+| CI Terraform `use_lockfile: Unsupported argument` | `use_lockfile` in S3 backend requires Terraform 1.10+ | Bumped `terraform_version` to `1.10.0` in `terraform.yml` |
+| Platform Terraform `Kubernetes cluster unreachable` | GitHub Actions IAM role not in EKS auth | Added `aws_eks_access_entry` + `aws_eks_access_policy_association` in `eks.tf` |
+| Platform CI `cannot re-use a name that is still in use` | Helm releases installed manually; Terraform state didn't know they existed | `terraform import helm_release.alb_controller kube-system/aws-load-balancer-controller` |
+| CI `Failed to load tfplan as a plan file` | `terraform plan -out=tfplan` failed silently (continue-on-error) leaving no file | Removed `-out=tfplan`; apply uses `terraform apply -auto-approve` inline |
+| Helm lock `another operation is in progress` | Multiple service pipelines triggered simultaneously on merge | Added `concurrency` groups to all deploy workflows |
+| `terraform destroy` hung on subnets/VPC | ALB and its ENIs still alive after cluster delete | Manual ALB delete + security group cleanup (see Teardown section) |
 
 ---
 
@@ -836,31 +940,16 @@ The [`docs/`](docs/) folder contains numbered guides walking through every phase
 
 | Phase | Topic | Doc |
 |------:|-------|-----|
-| 0 | Setup · Docker Compose · minikube basics | [00-roadmap.md](docs/00-roadmap.md) |
+| 0 | Roadmap | [00-roadmap.md](docs/00-roadmap.md) |
 | 1 | Local dev setup | [01-local-setup.md](docs/01-local-setup.md) |
-| 2 | Microservices split — 4 independent services | [02-microservices-split.md](docs/02-microservices-split.md) |
+| 2 | Microservices split | [02-microservices-split.md](docs/02-microservices-split.md) |
 | 3 | Kubernetes manifests | [03a-k8s-concepts.md](docs/03a-k8s-concepts.md) · [03b-k8s-practice.md](docs/03b-k8s-practice.md) |
-| 4 | Helm charts — packaging, values, dev/prod overlays | [04a-helm-concepts.md](docs/04a-helm-concepts.md) · [04b-helm-practice.md](docs/04b-helm-practice.md) |
-| 5 | EKS cluster with Terraform | [05a-eks-concepts.md](docs/05a-eks-concepts.md) · [05b-eks-practice.md](docs/05b-eks-practice.md) |
-| 6 | CI/CD — per-service GitHub Actions pipelines | [06a-cicd-concepts.md](docs/06a-cicd-concepts.md) · [06b-cicd-practice.md](docs/06b-cicd-practice.md) |
-| 7 | IRSA + K8s Secrets from Secrets Manager | [07a-secrets-concepts.md](docs/07a-secrets-concepts.md) · [07b-secrets-practice.md](docs/07b-secrets-practice.md) |
-| 8 | HPA — horizontal pod autoscaling | [08a-hpa-concepts.md](docs/08a-hpa-concepts.md) · [08b-hpa-practice.md](docs/08b-hpa-practice.md) |
+| 4 | Helm charts | [04a-helm-concepts.md](docs/04a-helm-concepts.md) · [04b-helm-practice.md](docs/04b-helm-practice.md) |
+| 5 | EKS with Terraform | [05a-eks-concepts.md](docs/05a-eks-concepts.md) · [05b-eks-practice.md](docs/05b-eks-practice.md) |
+| 6 | CI/CD — GitHub Actions + OIDC | [06a-cicd-concepts.md](docs/06a-cicd-concepts.md) · [06b-cicd-practice.md](docs/06b-cicd-practice.md) |
+| 7 | IRSA + Secrets Manager | [07a-secrets-concepts.md](docs/07a-secrets-concepts.md) · [07b-secrets-practice.md](docs/07b-secrets-practice.md) |
+| 8 | HPA | [08a-hpa-concepts.md](docs/08a-hpa-concepts.md) · [08b-hpa-practice.md](docs/08b-hpa-practice.md) |
 | 9 | Prometheus + Grafana + Loki | [09-observability.md](docs/09-observability.md) |
-
----
-
-## Known Issues & Resolutions
-
-| Issue | Root Cause | Fix |
-|-------|-----------|-----|
-| NodeCreationFailure (33+ min timeout) | DIY NAT instance couldn't route EKS API / ECR traffic reliably from private subnets | Moved node group to public subnets (`subnet_ids = aws_subnet.public[*].id`) |
-| `t3.micro` nodes crash — OOMKilled | Too little RAM for EKS CNI + system pods + app pods | Changed to `t3.small` |
-| ALB controller CrashLoopBackOff — `EC2MetadataError 401` | Controller couldn't discover VPC ID via IMDSv2 | Added `vpcId` to Helm set values in `alb.tf` |
-| `password authentication failed for user "patient_svc"` | Terraform creates Secrets Manager entries but never runs `CREATE USER` in PostgreSQL | Manual one-time psql pod init (Phase 3 above) |
-| `Secrets Manager: already scheduled for deletion` | Re-applied platform after partial destroy within 7-day window | Added `recovery_window_in_days = 0` to `secrets.tf` |
-| `DATABASE_URL` KeyError / empty env var | Helm `--set` mangles URLs containing `://` and `@` | Created K8s Secret and referenced via `secretKeyRef` in deployment template |
-| Helm provider v3 breaking change | `kubernetes {}` block → `kubernetes = {}` assignment; `set {}` blocks → `set = [...]` list | Updated `providers.tf` and `alb.tf` |
-| State lock left open | Previous `terraform apply` crashed mid-run | `terraform force-unlock <lock-id>` |
 
 ---
 
