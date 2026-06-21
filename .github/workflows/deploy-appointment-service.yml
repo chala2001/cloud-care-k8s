@@ -9,6 +9,10 @@ on:
       - "services/appointment-service/**"
       - ".github/workflows/deploy-appointment-service.yml"
 
+concurrency:
+  group: deploy-appointment-service-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: cloudcare-k8s-appointment-service

@@ -9,6 +9,10 @@ on:
       - "services/notification-service/**"
       - ".github/workflows/deploy-notification-service.yml"
 
+concurrency:
+  group: deploy-notification-service-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: cloudcare-k8s-notification-service

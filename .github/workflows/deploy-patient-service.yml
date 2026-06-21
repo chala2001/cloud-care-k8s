@@ -11,6 +11,10 @@ on:
       # only runs when patient-service code or this workflow file changes
       # pushing to appointment-service code does NOT trigger this
 
+concurrency:
+  group: deploy-patient-service-${{ github.ref }}
+  cancel-in-progress: false    # queue deploys, never cancel an in-progress deploy
+
 env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: cloudcare-k8s-patient-service
