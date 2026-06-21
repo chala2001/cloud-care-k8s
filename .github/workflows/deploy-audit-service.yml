@@ -9,6 +9,10 @@ on:
       - "services/audit-service/**"
       - ".github/workflows/deploy-audit-service.yml"
 
+concurrency:
+  group: deploy-audit-service-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: cloudcare-k8s-audit-service
